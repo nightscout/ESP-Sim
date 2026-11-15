@@ -133,6 +133,50 @@
     <div class="muted" style="margin-top:8px">Clears pairing and delivery: the next phone pairs it as a fresh pod. Deactivating the pod from the app does the same.</div>
   </section>
 
+  <section class="card" id="patchCard" aria-labelledby="h-patch">
+    <h2 id="h-patch">Medtrum patch</h2>
+    <div class="big">
+      <span class="val" id="patchReservoir">—</span>
+      <span class="unit">U in reservoir</span>
+      <span class="chip" id="patchState">—</span>
+    </div>
+    <dl>
+      <dt>Base serial</dt><dd id="patchBase">—</dd>
+      <dt>Model</dt><dd id="patchModel">—</dd>
+      <dt>Patch state</dt><dd id="patchStateName">—</dd>
+      <dt>Prime progress</dt><dd id="patchPrime">—</dd>
+      <dt>Patch clock</dt><dd id="patchClock">—</dd>
+      <dt>Battery</dt><dd id="patchBattery">—</dd>
+      <dt>Fault</dt><dd id="patchFault">—</dd>
+    </dl>
+    <div class="row">
+      <div><label for="patchModelIn">Model</label>
+        <select id="patchModelIn"><option value="200">200U</option><option value="300">300U</option></select></div>
+      <div style="flex:0"><button class="primary" id="patchModelSet">Set model</button></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div><label for="patchSnIn">Base serial (8 hex digits)</label><input id="patchSnIn" maxlength="8" autocomplete="off" placeholder="4A12D828"></div>
+      <div style="flex:0"><button class="primary" id="patchSnSet">Set serial</button></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div><label for="patchResIn">Units in the reservoir</label><input type="number" id="patchResIn" min="0" max="300" step="0.05"></div>
+      <div style="flex:0"><button class="primary" id="patchResSet">Set</button></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div><label for="patchStateIn">Patch state</label><select id="patchStateIn"></select></div>
+      <div style="flex:0"><button class="primary" id="patchStateSet">Set state</button></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div><label for="patchFaultIn">Fault</label><select id="patchFaultIn"></select></div>
+      <div style="flex:0"><button class="danger" id="patchFaultSet">Trigger fault</button><button id="patchFaultClear">Clear fault</button></div>
+    </div>
+    <div class="actions">
+      <button class="danger" id="patchCrash">Crash next command</button>
+      <button class="danger" id="patchNew">New patch</button>
+    </div>
+    <div class="muted" style="margin-top:8px" id="patchNote">The base carries the radio; the patch is the disposable half. A new patch clears the activation so the phone activates a fresh one. “Crash next command” reboots the base, leaving the phone without a response, then comes back as the same base.</div>
+  </section>
+
   <section class="card" aria-labelledby="h-cgm">
     <h2 id="h-cgm">CGM</h2>
     <div class="big">
@@ -328,6 +372,7 @@ const FAULTS = [
 ];
 const $ = id=>document.getElementById(id);
 const hex = n=>'0x'+n.toString(16).toUpperCase().padStart(2,'0');
+let patchOn = null;
 const units = u=>(Math.round(u*100)/100)+' U';
 const time = iso=>new Date(iso).toLocaleTimeString([], {timeStyle:'short'});
 const faultName = c=>{ const f=FAULTS.find(f=>f[0]===c); return f ? f[1] : 'unknown'; };
@@ -378,7 +423,7 @@ function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''
 
 function show(s){
   last = s;
-  $('title').textContent = (s.podType || 'DASH') + ' pod';
+  if(patchOn !== true) $('title').textContent = (s.podType || 'DASH') + ' pod';
   if(!edited.type) $('typeIn').value = s.podType === 'Omnipod 5' ? '1' : '0';
   $('podid').textContent = s.id ? 'id '+s.id : (s.paired ? '' : 'not paired');
   chip($('link'), s.connected ? 'connected' : 'not connected', s.connected ? 'ok' : '');
@@ -451,6 +496,69 @@ function showCgm(c){
 }
 async function refreshCgm(){ try { showCgm(await (await fetch('/cgm')).json()); } catch(e){} }
 refreshCgm(); setInterval(refreshCgm, 2000);
+
+/* ---- Medtrum patch ---- */
+const PATCH_STATES = {
+  0:'none',1:'idle',2:'filled',3:'priming',4:'primed',5:'ejecting',6:'ejected',
+  32:'active',33:'active (alt)',64:'suspended (low BG)',65:'suspended (low BG)',
+  66:'suspended (auto)',67:'suspended (hourly max)',68:'suspended (daily max)',
+  69:'suspended',70:'paused',96:'occlusion',97:'expired',98:'reservoir empty',
+  99:'patch fault',100:'patch fault 2',101:'base fault',102:'battery empty',
+  103:'no calibration',128:'stopped'
+};
+const PATCH_FAULTS = [[96,'Occlusion'],[97,'Expired'],[98,'Reservoir empty'],[99,'Patch fault'],
+  [100,'Patch fault 2'],[101,'Base fault'],[102,'Battery empty'],[103,'No calibration']];
+const PATCH_PRIME = {2:'ready to prime',3:'priming',4:'primed',32:'primed, active',33:'primed, active'};
+const patchStateName = s=>PATCH_STATES[s] || ('state '+s);
+const patchFaultName = c=>{ const f=PATCH_FAULTS.find(f=>f[0]===c); return f ? f[1] : 'unknown'; };
+const patchIsFault = s=>PATCH_FAULTS.some(f=>f[0]===s);
+$('patchStateIn').innerHTML = Object.keys(PATCH_STATES).map(v=>'<option value="'+v+'">'+patchStateName(+v)+' ('+v+')</option>').join('');
+$('patchFaultIn').innerHTML = PATCH_FAULTS.map(f=>'<option value="'+f[0]+'">'+hex(f[0])+' — '+f[1]+'</option>').join('');
+let patchEdited = {};
+['patchModelIn','patchSnIn','patchResIn','patchStateIn','patchFaultIn'].forEach(id=>$(id).oninput=()=>patchEdited[id]=true);
+async function patchSend(body, done){
+  try {
+    const r = await fetch('/patch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const t = await r.text();
+    if(!r.ok) throw new Error(t.trim());
+    showPatch(JSON.parse(t)); say(done);
+  } catch(e){ say('Failed — '+e.message); }
+}
+$('patchModelSet').onclick = ()=>{ patchEdited.patchModelIn=false; patchSend({command:'medtrumSetModel', units:+$('patchModelIn').value}, 'Model set'); };
+$('patchSnSet').onclick = ()=>{ patchEdited.patchSnIn=false; patchSend({command:'medtrumSetSerial', sn:$('patchSnIn').value.trim().toUpperCase()}, 'Serial set'); };
+$('patchResSet').onclick = ()=>{ patchEdited.patchResIn=false; patchSend({command:'medtrumSetReservoir', units:+$('patchResIn').value}, 'Reservoir set'); };
+$('patchStateSet').onclick = ()=>{ patchEdited.patchStateIn=false; patchSend({command:'medtrumSetState', state:+$('patchStateIn').value}, 'State set'); };
+$('patchFaultSet').onclick = ()=>{ const c=+$('patchFaultIn').value;
+  if(confirm('Fault the patch with '+hex(c)+' — '+patchFaultName(c)+'? A faulted patch stops delivery and must be replaced.'))
+    patchSend({command:'medtrumSetFault', state:c}, 'Fault triggered'); };
+$('patchFaultClear').onclick = ()=>patchSend({command:'medtrumSetFault', state:32}, 'Fault cleared');
+$('patchCrash').onclick = ()=>{ if(confirm('Reboot the base at the next command? The phone loses its in-flight command.')) patchSend({command:'medtrumCrash'}, 'Armed'); };
+$('patchNew').onclick = ()=>{ if(confirm('Forget this patch? The phone will need to activate a new one.')) patchSend({command:'medtrumReset'}, 'New patch ready'); };
+function showPatch(p){
+  $('title').textContent = 'Medtrum patch';
+  $('patchBase').textContent = p.serial;
+  $('patchModel').textContent = p.model + (p.model === 'MD8301' ? ' (300U)' : ' (200U)');
+  if(!patchEdited.patchModelIn) $('patchModelIn').value = p.model === 'MD8301' ? '300' : '200';
+  $('patchReservoir').textContent = Math.round(p.reservoir*100)/100;
+  chip($('patchState'), patchStateName(p.state), patchIsFault(p.state) ? 'bad' : p.state===32 ? 'ok' : 'warn');
+  $('patchStateName').textContent = patchStateName(p.state) + ' (' + p.state + ')';
+  $('patchPrime').textContent = PATCH_PRIME[p.state] || '—';
+  $('patchClock').textContent = new Date((p.patchTime + 1388534400) * 1000).toISOString().replace('T',' ').slice(0,19) + ' UTC';
+  $('patchBattery').textContent = p.battery.toFixed(2) + ' V';
+  $('patchFault').textContent = patchIsFault(p.state) ? hex(p.state)+' — '+patchFaultName(p.state) : 'none';
+  if(!patchEdited.patchResIn && document.activeElement!==$('patchResIn')) $('patchResIn').value = Math.round(p.reservoir*100)/100;
+  if(!patchEdited.patchSnIn && document.activeElement!==$('patchSnIn')) $('patchSnIn').value = p.serial;
+  if(!patchEdited.patchStateIn) $('patchStateIn').value = String(p.state);
+}
+async function refreshPatch(){
+  try {
+    const r = await fetch('/patch');
+    if(!r.ok){ if(patchOn!==false){ patchOn=false; $('patchCard').style.display='none'; } return; }
+    patchOn = true; $('patchCard').style.display='';
+    showPatch(await r.json());
+  } catch(e){}
+}
+refreshPatch(); setInterval(refreshPatch, 1000);
 </script>
 </body>
 </html>

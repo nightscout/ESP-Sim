@@ -228,6 +228,17 @@ static void restart(void *arg)
     esp_restart();
 }
 
+/* Reboots the board after a moment, dropping whatever the phone is doing. */
+static void schedule_restart(unsigned ms)
+{
+    static esp_timer_handle_t t;
+    const esp_timer_create_args_t args = {.callback = restart, .name = "restart"};
+    if (!t) {
+        esp_timer_create(&args, &t);
+    }
+    esp_timer_start_once(t, (uint64_t)ms * 1000);
+}
+
 static esp_err_t post_wifi(httpd_req_t *req)
 {
     char body[256], ssid[33], pass[65];
@@ -242,14 +253,47 @@ static esp_err_t post_wifi(httpd_req_t *req)
     }
     store_save_wifi(ssid, pass);
     httpd_resp_sendstr(req, "saved; restarting\n");
-    static esp_timer_handle_t t;
-    const esp_timer_create_args_t args = {.callback = restart, .name = "restart"};
-    if (!t) {
-        esp_timer_create(&args, &t);
-    }
-    esp_timer_start_once(t, 1000 * 1000);
+    schedule_restart(1000);
     return ESP_OK;
 }
+
+/* ---- the Medtrum patch: GET /patch, POST /patch ----------------------------- */
+
+#if CONFIG_ESPSIM_DEVICE_MEDTRUM
+static esp_err_t send_patch(httpd_req_t *req)
+{
+    char json[512];
+    size_t n = medtrum_app_status_json(json, sizeof json);
+    if (n == 0) {
+        return httpd_resp_send_500(req);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, (ssize_t)n);
+}
+
+static esp_err_t post_patch(httpd_req_t *req)
+{
+    char body[256];
+    if (read_body(req, body, sizeof body) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request body");
+        return ESP_OK;
+    }
+    /* The patch core has no crash hook, so the panel reboots the base itself:
+     * the phone loses its in-flight command and finds the base again. */
+    char cmd[32];
+    if (json_string(body, "command", cmd, sizeof cmd) && strcmp(cmd, "medtrumCrash") == 0) {
+        schedule_restart(1500);
+        return send_patch(req);
+    }
+    const char *err = medtrum_app_command(body);
+    if (err) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+        return ESP_OK;
+    }
+    return send_patch(req);
+}
+#endif
 
 void panel_start(dash_pod_t *pod)
 {
@@ -267,6 +311,10 @@ void panel_start(dash_pod_t *pod)
         {.uri = "/wifi", .method = HTTP_POST, .handler = post_wifi},
         {.uri = "/cgm", .method = HTTP_GET, .handler = send_cgm},
         {.uri = "/cgm", .method = HTTP_POST, .handler = post_cgm},
+#if CONFIG_ESPSIM_DEVICE_MEDTRUM
+        {.uri = "/patch", .method = HTTP_GET, .handler = send_patch},
+        {.uri = "/patch", .method = HTTP_POST, .handler = post_patch},
+#endif
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; i++) {
         httpd_register_uri_handler(server, &routes[i]);
