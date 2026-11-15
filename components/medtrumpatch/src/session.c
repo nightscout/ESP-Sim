@@ -16,6 +16,7 @@ void medtrum_patch_init(medtrum_patch_t *p, const uint8_t sn[4])
         memcpy(p->sn, sn, 4);
     }
     p->status.state = MEDTRUM_STATE_NONE;
+    p->delivery.last_ms = INT64_MIN;
 }
 
 void medtrum_patch_set_state(medtrum_patch_t *p, uint8_t state)
@@ -88,6 +89,6 @@ int medtrum_patch_handle(medtrum_patch_t *p, uint8_t command, uint8_t sequence, 
         return medtrum_encode_response(command, sequence, MEDTRUM_RESPONSE_OK, payload, 1, frags, max_frags);
     }
     default:
-        return -1;
+        return medtrum_patch_command(p, command, sequence, content, content_len, frags, max_frags);
     }
 }

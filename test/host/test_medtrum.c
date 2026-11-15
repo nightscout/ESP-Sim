@@ -629,14 +629,251 @@ static void test_session_failures(void)
         CHECK(pkt.response_code == MEDTRUM_RESPONSE_BAD_TOKEN);
     }
 
-    /* A command outside the session is left for the caller. */
-    CHECK(medtrum_patch_handle(&p, MEDTRUM_CMD_SET_BOLUS, 0, NULL, 0, resp, MEDTRUM_FRAGS_MAX) == -1);
+    /* A command this build does not implement is left for the caller. */
+    CHECK(medtrum_patch_handle(&p, MEDTRUM_CMD_GET_DEVICE_TYPE, 0, NULL, 0, resp, MEDTRUM_FRAGS_MAX) == -1);
 
     /* A response payload that will not fit the size byte is refused. */
     uint8_t big[250];
     memset(big, 0, sizeof big);
     CHECK(medtrum_encode_response(MEDTRUM_CMD_SYNCHRONIZE, 0, 0, big, sizeof big, resp, MEDTRUM_FRAGS_MAX) ==
           -1);
+}
+
+/* ---- the delivery lifecycle -------------------------------------------- */
+
+/* Decodes a response and compares its payload (after the 6-byte prefix). */
+static void check_payload(const medtrum_frag_t *frags, int n, uint8_t command, uint16_t rc,
+                          const uint8_t *want, size_t want_len)
+{
+    medtrum_packet_t pkt;
+    medtrum_decode_init(&pkt, command);
+    for (int i = 0; i < n; i++) {
+        medtrum_decode(&pkt, frags[i].data, frags[i].len);
+    }
+    CHECK(!pkt.failed);
+    CHECK(medtrum_complete(&pkt));
+    CHECK(pkt.response_code == rc);
+    CHECK(pkt.len >= 6);
+    if (pkt.len >= 6) {
+        CHECK_BYTES(pkt.data + 6, pkt.len - 6, want, want_len);
+    }
+}
+
+static void test_lifecycle(void)
+{
+    /* Expected response payloads, computed from the values below. */
+    static const uint8_t prime_pl[] = {3};
+    static const uint8_t activate_pl[] = {41, 0, 0, 0, 128, 81, 1, 0, 1, 20, 0, 1, 0, 41, 0, 128, 81, 1, 0};
+    static const uint8_t note_active[] = {32, 232, 5, 1, 1, 0, 41, 0, 128, 81, 1, 0, 20, 0, 0, 152, 14,
+                                          128, 81, 1, 0, 240, 11, 90, 1, 0, 41, 0, 0, 0, 0, 0};
+    static const uint8_t setbasal_pl[] = {1, 20, 0, 2, 0, 41, 0, 128, 81, 1, 0};
+    static const uint8_t settemp_pl[] = {6, 25, 0, 3, 0, 41, 0, 128, 81, 1, 0};
+    static const uint8_t canceltemp_pl[] = {1, 20, 0, 4, 0, 41, 0, 0xbc, 0x51, 1, 0}; /* 86460 s */
+    static const uint8_t state_active[] = {32};
+    static const uint8_t state_suspended[] = {69};
+    static const uint8_t gettime_pl[] = {188, 81, 1, 0};
+    static const uint8_t stop_pl[] = {1, 0, 41, 0};
+
+    medtrum_patch_t p;
+    uint8_t sn[4] = {217, 249, 118, 170};
+    medtrum_patch_init(&p, sn);
+    p.device_type = 80;
+    p.sw_version[0] = 12;
+    p.sw_version[1] = 1;
+    p.sw_version[2] = 3;
+    medtrum_patch_set_patch_id(&p, (uint8_t[]){41, 0, 0, 0});
+    medtrum_patch_set_reservoir(&p, 3736);  /* 186.8 U */
+    medtrum_patch_set_battery(&p, 5901296); /* 5.97 V / 2.81 V */
+
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+    int n;
+    uint8_t seq = 0;
+
+    /* The patch starts filled, with the time set. */
+    medtrum_patch_set_state(&p, MEDTRUM_STATE_FILLED);
+    uint8_t set_time[] = {2, 0x80, 0x51, 0x01, 0x00}; /* 86400 Medtrum seconds */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_TIME, seq++, set_time, sizeof set_time, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.delivery.patch_time == 86400);
+
+    /* PRIME: filled -> priming. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_PRIME, seq++, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_PRIME, MEDTRUM_RESPONSE_OK, prime_pl, sizeof prime_pl);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMING);
+    CHECK(p.status.mask & MEDTRUM_MASK_SETUP);
+
+    /* ACTIVATE: a one-entry schedule of 1.0 U/h, 40 U/h and 180 U/day limits. */
+    uint8_t activate[] = {0, 12, 1, 6, 0, 0, 30, 32, 3, 16, 14, 0, 0, 1, 1, 0x00, 0x40, 0x01};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_ACTIVATE, seq++, activate, sizeof activate, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 2); /* a 25-byte response fragments */
+    check_payload(resp, n, MEDTRUM_CMD_ACTIVATE, MEDTRUM_RESPONSE_OK, activate_pl, sizeof activate_pl);
+    CHECK(p.status.state == MEDTRUM_STATE_ACTIVE);
+    CHECK(p.delivery.patch_start == 86400);
+    CHECK(p.delivery.scheduled_rate == 20);
+    CHECK(!(p.status.mask & MEDTRUM_MASK_SETUP));
+
+    /* The status notification reflects the activation. */
+    uint8_t note[MEDTRUM_STATUS_MAX];
+    size_t note_len = medtrum_patch_notification(&p, note, sizeof note);
+    CHECK_BYTES(note, note_len, note_active, sizeof note_active);
+
+    /* SET_BASAL_PROFILE: the same schedule, sequence advances. */
+    uint8_t profile[] = {1, 1, 0x00, 0x40, 0x01};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_BASAL_PROFILE, seq++, profile, sizeof profile, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_SET_BASAL_PROFILE, MEDTRUM_RESPONSE_OK, setbasal_pl,
+                  sizeof setbasal_pl);
+    CHECK(p.status.basal_sequence == 2);
+
+    /* SET_TEMP_BASAL: 1.25 U/h for an hour. */
+    uint8_t temp[] = {6, 0x19, 0x00, 0x3C, 0x00};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_TEMP_BASAL, seq++, temp, sizeof temp, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_SET_TEMP_BASAL, MEDTRUM_RESPONSE_OK, settemp_pl, sizeof settemp_pl);
+    CHECK(p.delivery.temp_rate == 25);
+    CHECK(p.delivery.temp_end == 90000);
+    CHECK(p.status.basal_type == MEDTRUM_BASAL_ABSOLUTE_TEMP);
+
+    /* SET_BOLUS: 1.40 U. */
+    uint8_t bolus[] = {1, 0x1C, 0x00, 0};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_BOLUS, seq++, bolus, sizeof bolus, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_SET_BOLUS, MEDTRUM_RESPONSE_OK, state_active, sizeof state_active);
+    CHECK(p.delivery.bolus_active);
+    CHECK(p.delivery.bolus_total == 28);
+    CHECK(p.status.mask & MEDTRUM_MASK_NORMAL_BOLUS);
+
+    /* Ticking advances the bolus at 1.5 U/min and the patch age. */
+    medtrum_patch_tick(&p, 1000000); /* records the clock */
+    medtrum_patch_tick(&p, 1020000); /* +20 s: 10 pulses */
+    CHECK(p.delivery.patch_time == 86420);
+    CHECK(p.status.bolus_delivered == 10);
+    medtrum_patch_tick(&p, 1060000); /* +40 s: the bolus completes */
+    CHECK(p.delivery.patch_time == 86460);
+    CHECK(p.status.bolus_delivered == 28);
+    CHECK(p.status.bolus_completed);
+    CHECK(!p.delivery.bolus_active);
+    CHECK(p.status.patch_age == 60);
+
+    /* CANCEL_TEMP_BASAL goes back to the schedule. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_CANCEL_TEMP_BASAL, seq++, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_CANCEL_TEMP_BASAL, MEDTRUM_RESPONSE_OK, canceltemp_pl,
+                  sizeof canceltemp_pl);
+    CHECK(p.delivery.temp_end == 0);
+    CHECK(p.status.basal_type == MEDTRUM_BASAL_STANDARD);
+
+    /* CANCEL_BOLUS. */
+    uint8_t cancel_bolus[] = {1};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_CANCEL_BOLUS, seq++, cancel_bolus, sizeof cancel_bolus, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(!(p.status.mask & MEDTRUM_MASK_NORMAL_BOLUS));
+
+    /* SUSPEND then RESUME. */
+    uint8_t suspend[] = {3, 120};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SUSPEND_PUMP, seq++, suspend, sizeof suspend, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_SUSPEND_PUMP, MEDTRUM_RESPONSE_OK, state_suspended,
+                  sizeof state_suspended);
+    CHECK(p.status.state == MEDTRUM_STATE_SUSPENDED);
+    CHECK(p.status.mask & MEDTRUM_MASK_SUSPEND);
+
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_RESUME_PUMP, seq++, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_RESUME_PUMP, MEDTRUM_RESPONSE_OK, state_active, sizeof state_active);
+    CHECK(p.status.state == MEDTRUM_STATE_ACTIVE);
+    CHECK(!(p.status.mask & MEDTRUM_MASK_SUSPEND));
+
+    /* SET_PATCH updates the limits and the alarm setting. */
+    uint8_t set_patch[] = {1, 0x20, 0x03, 0x10, 0x0E, 0, 0, 12, 0, 0, 30};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_PATCH, seq++, set_patch, sizeof set_patch, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_SET_PATCH, MEDTRUM_RESPONSE_OK, state_active, sizeof state_active);
+    CHECK(p.delivery.max_hourly == 800);
+    CHECK(p.delivery.max_daily == 3600);
+
+    /* An alarm is visible until CLEAR_ALARM. */
+    medtrum_patch_set_alarm(&p, MEDTRUM_ALARM_LOW_BATTERY);
+    CHECK(p.status.mask & MEDTRUM_MASK_ALARM);
+    uint8_t clear[] = {4, 0};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_CLEAR_ALARM, seq++, clear, sizeof clear, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(!(p.status.mask & MEDTRUM_MASK_ALARM));
+
+    /* GET_TIME reflects the ticking clock. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_GET_TIME, seq++, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_GET_TIME, MEDTRUM_RESPONSE_OK, gettime_pl, sizeof gettime_pl);
+
+    /* SET_TIME_ZONE and SET_TIME move the clock. */
+    uint8_t tz[] = {0x3C, 0x00, 0xA0, 0x86, 0x01, 0x00}; /* +60 min, 100000 s */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_TIME_ZONE, seq++, tz, sizeof tz, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.delivery.timezone_minutes == 60);
+    CHECK(p.delivery.patch_time == 100000);
+
+    /* A negative offset survives the +65536 wire encoding. */
+    uint8_t tz_neg[] = {0xD4, 0xFE, 0xA0, 0x86, 0x01, 0x00}; /* -300 min */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_TIME_ZONE, seq++, tz_neg, sizeof tz_neg, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.delivery.timezone_minutes == -300);
+
+    uint8_t set_time2[] = {2, 0x40, 0x0D, 0x03, 0x00}; /* 200000 s */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_TIME, seq++, set_time2, sizeof set_time2, resp,
+                             MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.delivery.patch_time == 200000);
+
+    /* STOP_PATCH reports the storage sequence and patch id, then stops. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_STOP_PATCH, seq++, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    check_payload(resp, n, MEDTRUM_CMD_STOP_PATCH, MEDTRUM_RESPONSE_OK, stop_pl, sizeof stop_pl);
+    CHECK(p.status.state == MEDTRUM_STATE_STOPPED);
+    CHECK(p.status.mask == 0);
+}
+
+static void test_fault_mapping(void)
+{
+    medtrum_patch_t p;
+    medtrum_patch_init(&p, (uint8_t[]){1, 2, 3, 4});
+    medtrum_patch_set_state(&p, MEDTRUM_STATE_ACTIVE);
+    CHECK(medtrum_state_is_running(p.status.state));
+
+    medtrum_patch_set_fault(&p, MEDTRUM_STATE_OCCLUSION);
+    CHECK(p.status.state == MEDTRUM_STATE_OCCLUSION);
+    CHECK(medtrum_state_is_fault(p.status.state));
+    CHECK(medtrum_state_is_terminated(p.status.state));
+    CHECK(medtrum_state_is_delivery_halted(p.status.state));
+
+    medtrum_patch_set_alarm(&p, MEDTRUM_ALARM_LOW_BATTERY | MEDTRUM_ALARM_LOW_RESERVOIR);
+    CHECK(p.status.alarm_flags == 3);
+    CHECK(p.status.mask & MEDTRUM_MASK_ALARM);
+    medtrum_patch_set_alarm(&p, 0);
+    CHECK(!(p.status.mask & MEDTRUM_MASK_ALARM));
+
+    /* PRIME refuses a patch that is not filled. */
+    medtrum_patch_t q;
+    medtrum_patch_init(&q, (uint8_t[]){0, 0, 0, 0});
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+    int n = medtrum_patch_handle(&q, MEDTRUM_CMD_PRIME, 0, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    if (n == 1) {
+        medtrum_packet_t pkt;
+        medtrum_decode_init(&pkt, MEDTRUM_CMD_PRIME);
+        medtrum_decode(&pkt, resp[0].data, resp[0].len);
+        CHECK(pkt.response_code == MEDTRUM_RESPONSE_BAD_STATE);
+    }
 }
 
 int main(void)
@@ -656,6 +893,8 @@ int main(void)
     test_sync_full_vector();
     test_session();
     test_session_failures();
+    test_lifecycle();
+    test_fault_mapping();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -277,6 +277,56 @@ typedef struct {
  * SYNCHRONIZE response. */
 size_t medtrum_status_payload(const medtrum_status_t *st, uint8_t *out, size_t cap);
 
+/* ---- delivery ---------------------------------------------------------- */
+
+/* Alarm flags: the low three bits of the MASK_ALARM field. */
+enum {
+    MEDTRUM_ALARM_LOW_BATTERY = 0x0001,
+    MEDTRUM_ALARM_LOW_RESERVOIR = 0x0002,
+    MEDTRUM_ALARM_EXPIRES_SOON = 0x0004,
+};
+
+/* Clear-alarm alert types (MedtrumKit's AlertType). */
+enum {
+    MEDTRUM_ALERT_HOURLY = 4,
+    MEDTRUM_ALERT_DAILY = 5,
+};
+
+/* Basal types the client sends and parses. */
+enum {
+    MEDTRUM_BASAL_STANDARD = 1,
+    MEDTRUM_BASAL_ABSOLUTE_TEMP = 6,
+};
+
+/* The largest basal profile MedtrumKit sends: count + entries of 3 bytes. */
+#define MEDTRUM_BASAL_PROFILE_MAX 150
+
+/* The delivery model. The commands project it into `status`, and
+ * medtrum_patch_tick keeps the clock, the bolus progress, the temp basal and
+ * the patch age moving. */
+typedef struct {
+    uint8_t patch_id[4];      /* the active patch's id */
+    uint32_t patch_time;      /* the patch's clock, Medtrum seconds */
+    uint32_t patch_start;     /* activation time, Medtrum seconds */
+    int32_t timezone_minutes; /* from SET_TIME_ZONE */
+    int64_t last_ms;          /* wall clock of the last tick */
+    uint16_t scheduled_rate;  /* scheduled basal, pulses of 0.05 U/h */
+    uint16_t temp_rate;       /* active temp basal, pulses */
+    uint32_t temp_end;        /* Medtrum seconds; 0 = no temp basal */
+    uint16_t basal_sequence;
+    uint16_t bolus_total;     /* pulses */
+    uint32_t bolus_start;     /* Medtrum seconds */
+    bool bolus_active;
+    uint16_t storage_sequence;
+    uint16_t max_hourly;      /* pulses */
+    uint16_t max_daily;       /* pulses */
+    uint8_t alarm_setting;
+    uint8_t expiry_timer;
+    uint16_t alarm_flags;
+    uint8_t basal_profile[MEDTRUM_BASAL_PROFILE_MAX];
+    size_t basal_profile_len;
+} medtrum_delivery_t;
+
 /* ---- the patch and its connect session --------------------------------- */
 
 typedef struct {
@@ -291,6 +341,7 @@ typedef struct {
      * the client ignores; a real patch always seems to send it. */
     uint8_t sync_tail;
     medtrum_status_t status;
+    medtrum_delivery_t delivery;
 } medtrum_patch_t;
 
 void medtrum_patch_init(medtrum_patch_t *p, const uint8_t sn[4]);
@@ -306,6 +357,22 @@ size_t medtrum_patch_notification(const medtrum_patch_t *p, uint8_t *out, size_t
  * session. */
 int medtrum_patch_handle(medtrum_patch_t *p, uint8_t command, uint8_t sequence, const uint8_t *content,
                          size_t content_len, medtrum_frag_t *frags, size_t max_frags);
+
+/* Handles a delivery command (everything outside the connect session).
+ * Returns the fragment count, or -1 if the command is not implemented. */
+int medtrum_patch_command(medtrum_patch_t *p, uint8_t command, uint8_t sequence, const uint8_t *content,
+                          size_t content_len, medtrum_frag_t *frags, size_t max_frags);
+
+/* Advances the patch clock, the bolus progress, the temp basal and the patch
+ * age. `now_ms` is the platform's wall clock; the first call only records it. */
+void medtrum_patch_tick(medtrum_patch_t *p, int64_t now_ms);
+
+/* Direct setters, for the control panel and for tests. */
+void medtrum_patch_set_reservoir(medtrum_patch_t *p, uint16_t pulses);
+void medtrum_patch_set_battery(medtrum_patch_t *p, uint32_t raw);
+void medtrum_patch_set_patch_id(medtrum_patch_t *p, const uint8_t id[4]);
+void medtrum_patch_set_alarm(medtrum_patch_t *p, uint16_t flags);
+void medtrum_patch_set_fault(medtrum_patch_t *p, uint8_t state);
 
 #ifdef __cplusplus
 }
