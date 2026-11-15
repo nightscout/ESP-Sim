@@ -2,13 +2,13 @@
 
 > **Test equipment only.** ESP-Sim pretends to be an insulin pod, and
 > optionally a CGM, so that controller apps (Loop, Trio and others using
-> OmnipodKit, CGMBLEKit and G7SensorKit) can be developed and tested without
-> real devices. It delivers no insulin, its glucose readings are made up, and
-> nothing it reports reflects a real device. Never use it — or an app paired
-> to it — for anyone's therapy. **Never let a phone that controls a real pump
-> or pod read the simulated CGM:** the app would dose insulin from made-up
-> numbers. This is not medical advice; talk to your care team about your own
-> treatment.
+> OmnipodKit, MedtrumKit, CGMBLEKit and G7SensorKit) can be developed and
+> tested without real devices. It delivers no insulin, its glucose readings
+> are made up, and nothing it reports reflects a real device. Never use it —
+> or an app paired to it — for anyone's therapy. **Never let a phone that
+> controls a real pump or pod read the simulated CGM:** the app would dose
+> insulin from made-up numbers. This is not medical advice; talk to your care
+> team about your own treatment.
 
 This is a C port of the Go DASH simulator
 ([jeremybarnum/pod](https://github.com/jeremybarnum/pod) at
@@ -17,8 +17,9 @@ This is a C port of the Go DASH simulator
 protocol — pairing, EAP-AKA sessions, encrypted pod commands — and serves the
 same control panel, from a board that needs no Pi, no Linux and no Go.
 
-It can also be an Omnipod 5 pod, and at the same time a Dexcom G6 or G7:
-see [Omnipod 5](#omnipod-5) and [Dexcom G6 and G7](#dexcom-g6-and-g7) below.
+It can also be an Omnipod 5 pod or a Medtrum patch, and at the same time a
+Dexcom G6 or G7: see [Omnipod 5](#omnipod-5), [Medtrum patch](#medtrum-patch)
+and [Dexcom G6 and G7](#dexcom-g6-and-g7) below.
 
 ## Hardware
 
@@ -95,6 +96,7 @@ is kept byte for byte: see the tests.
 |---|---|
 | `components/cgmsim/` | The simulated Dexcom G6 transmitter and G7 sensor, as portable C |
 | `components/dashpod/` | The pod, as portable C: crypto (AES-CCM, CMAC, X25519, Milenage; AES, SHA-256 and P-256 from mbedTLS), messages, link layer, pairing (DASH and Omnipod 5), EAP-AKA, commands, responses, state machine |
+| `components/medtrumpatch/` | The simulated Medtrum patch, as portable C: CRC-8, the key derivation, packet framing and the patch state machine |
 | `main/` | The ESP32 side: NimBLE GATT and advertising for both devices (`ble.c`), the CGM's clock and commands (`cgm_app.c`), NVS (`store.c`), Wi-Fi and the HTTP panel (`panel.c`, `panel.html`) |
 | `test/host/` | Host tests (macOS) |
 | `tools/golden/` | Generates `test/host/golden_dash.h` by running the upstream Go code |
@@ -161,6 +163,55 @@ inputs and writes `golden_o5.h`:
 ```bash
 tools/o5golden/gen.sh
 ```
+
+## Medtrum patch
+
+> **Use a test phone.** The patch reports the reservoir, battery and delivery
+> state the panel says, and it delivers no insulin. A phone paired to the
+> simulated patch must never control anyone's therapy.
+
+Medtrum's pump is two parts: a reusable **pump base** — the Bluetooth device
+that carries the radio, serial number, model and firmware — and a disposable
+**patch**, the reservoir and cannula that clip onto it. The simulator is a
+pump base that primes a patch; Medtrum's parts are a base and a patch, and
+this section uses those names throughout.
+
+In the control panel's *Medtrum patch* card, choose the model and set the base
+serial number, watch or set the patch's state, ID, reservoir, prime progress
+and battery, raise a fault, make the next command go unanswered to test the
+app's recovery, and start a new patch. Its JSON API is `GET /patch` and
+`POST /patch`.
+
+The Medtrum side follows the controller that apps use,
+[MedtrumKit](https://github.com/loopandlearn/MedtrumKit) (`ef866fa`), the pump
+manager in Trio. It speaks MedtrumKit's Bluetooth protocol: it advertises as
+`MT` with the base serial in its manufacturer data, exposes the service
+`669A9001-…` with a status READ characteristic and a command WRITE
+characteristic, frames commands with a CRC-8, and authenticates with a key
+derived from the base serial number.
+
+- **Two models.** The base serial number decides the model and its reservoir
+  size: `4A12D828` is an MD0201, a 200 U base, and `52DF1614` is an MD8301, a
+  300 U base. The serial is runtime state, set in the panel and kept in flash,
+  so the base can be switched without rebuilding the firmware.
+- **Patch states.** A patch moves through idle, filled, priming, primed and
+  active, and reports suspended, fault and stopped states, as MedtrumKit
+  expects.
+- **Delivery.** Basal, temp basal and bolus commands drive a simulated
+  delivery state — reservoir, patch age and battery — that the app sees in
+  the base's status notifications.
+
+### Tests (Medtrum patch)
+
+```bash
+make -C test/host medtrum
+```
+
+This target builds only the portable Medtrum C core, with no mbedTLS or
+ESP-IDF, and checks the CRC-8, the key derivation and the packet framing
+against the byte vectors in MedtrumKit's own tests, then runs a whole session
+— auth, synchronize, subscribe and the delivery commands — against a simulated
+phone.
 
 ## Dexcom G6 and G7
 
