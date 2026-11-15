@@ -97,36 +97,51 @@ static void set_clock(bool have_state)
     settimeofday(&tv, NULL);
 }
 
+#if !CONFIG_ESPSIM_DEVICE_MEDTRUM
 static void pod_task(void *arg)
 {
     dash_pod_run(&pod);
     vTaskDelete(NULL);
 }
+#endif
 
 void app_main(void)
 {
-    ESP_LOGW(TAG, "ESP-Sim DASH pod simulator. TEST EQUIPMENT: delivers nothing; never use for therapy.");
+    ESP_LOGW(TAG, "ESP-Sim. TEST EQUIPMENT: delivers nothing; never use it for therapy.");
 
     store_init();
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     setenv("TZ", CONFIG_ESPSIM_TZ, 1);
     tzset();
 
+    /* The control panel always speaks to a pod, so one is initialised even in
+     * a Medtrum build, where it simply never runs or advertises. */
     bool have = store_load_state(&restored);
     set_clock(have);
     pod_mu = xSemaphoreCreateMutex();
     dash_pod_init(&pod, &io, have ? &restored : NULL);
+
+    ble_start();
+    cgm_app_start();
+
+#if CONFIG_ESPSIM_DEVICE_MEDTRUM
+    medtrum_app_start();
+#else
+    if (!have) {
+#if CONFIG_ESPSIM_DEVICE_O5
+        dash_pod_set_type(&pod, DASH_POD_O5);
+#endif
+        store_save_state(NULL, &pod.st);
+    }
     if (have) {
         ESP_LOGI(TAG, "restored the %s pod: %s, progress %d, reservoir %.2f U",
                  pod.st.pod_type == DASH_POD_O5 ? "Omnipod 5" : "DASH", pod.st.paired ? "paired" : "not paired",
                  pod.st.progress, pod.st.reservoir * 0.05);
     } else {
-        ESP_LOGI(TAG, "a new DASH pod: not paired, 150 U (the control panel switches it to Omnipod 5)");
-        store_save_state(NULL, &pod.st);
+        ESP_LOGI(TAG, "a new %s pod: not paired, 150 U", pod.st.pod_type == DASH_POD_O5 ? "Omnipod 5" : "DASH");
     }
-
-    ble_start();
-    cgm_app_start();
-    panel_start(&pod);
     xTaskCreatePinnedToCore(pod_task, "pod", 12288, NULL, 5, NULL, tskNO_AFFINITY);
+#endif
+
+    panel_start(&pod);
 }

@@ -75,6 +75,23 @@ bool store_load_cgm(cgm_state_t *st)
     return nvs_get_blob(nvs, "cgm", st, &len) == ESP_OK && len == sizeof *st && st->version == CGM_STATE_VERSION;
 }
 
+bool store_load_medtrum(medtrum_saved_t *st)
+{
+    size_t len = sizeof *st;
+    return nvs_get_blob(nvs, "medtrum", st, &len) == ESP_OK && len == sizeof *st;
+}
+
+void store_save_medtrum(void *ctx, const medtrum_saved_t *st)
+{
+    esp_err_t err = nvs_set_blob(nvs, "medtrum", st, sizeof *st);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "could not save the Medtrum state: %s", esp_err_to_name(err));
+    }
+}
+
 void store_save_cgm(void *ctx, const cgm_state_t *st)
 {
     esp_err_t err = nvs_set_blob(nvs, "cgm", st, sizeof *st);

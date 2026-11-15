@@ -1,4 +1,39 @@
-menu "ESP-Sim DASH pod"
+menu "ESP-Sim"
+
+choice ESPSIM_DEVICE
+    prompt "Device to simulate"
+    default ESPSIM_DEVICE_DASH
+    help
+        The board pretends to be one insulin device at a time. DASH and
+        Omnipod 5 share the pod core and can still be switched at runtime
+        from the control panel; the Medtrum Nano patch is a separate build.
+
+config ESPSIM_DEVICE_DASH
+    bool "Omnipod DASH pod"
+
+config ESPSIM_DEVICE_O5
+    bool "Omnipod 5 pod"
+
+config ESPSIM_DEVICE_MEDTRUM
+    bool "Medtrum Nano patch"
+
+endchoice
+
+choice ESPSIM_MEDTRUM_MODEL
+    prompt "Medtrum model"
+    depends on ESPSIM_DEVICE_MEDTRUM
+    default ESPSIM_MEDTRUM_200
+    help
+        The default serial for a base with no saved state. The control panel
+        can pivot it later without a rebuild.
+
+config ESPSIM_MEDTRUM_200
+    bool "200U (serial 4A12D828)"
+
+config ESPSIM_MEDTRUM_300
+    bool "300U (serial 52DF1614)"
+
+endchoice
 
 config ESPSIM_TZ
     string "Time zone (POSIX TZ)"

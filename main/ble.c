@@ -56,15 +56,30 @@ static const ble_uuid128_t dex_chr_uuid[CGM_CHR_COUNT] = {
 };
 static const ble_uuid16_t dex_adv_uuid = BLE_UUID16_INIT(0xfebc);
 
+/* Medtrum: 669A9001-0008-968F-E311-6050405558B3 with READ 669a9120-... and
+ * WRITE 669a9101-... . Both notify: responses go on WRITE, the status
+ * notifications on READ. */
+#define MEDTRUM_UUID(b12, b13) \
+    BLE_UUID128_INIT(0xb3, 0x58, 0x55, 0x40, 0x50, 0x60, 0x11, 0xe3, 0x8f, 0x96, 0x08, 0x00, b12, b13, \
+                     0x9a, 0x66)
+
+static const ble_uuid128_t medtrum_svc_uuid = MEDTRUM_UUID(0x01, 0x90);
+static const ble_uuid128_t medtrum_read_uuid = MEDTRUM_UUID(0x20, 0x91);
+static const ble_uuid128_t medtrum_write_uuid = MEDTRUM_UUID(0x01, 0x91);
+
 static const ble_uuid16_t gap_svc_uuid = BLE_UUID16_INIT(0x1800);
 static const ble_uuid16_t gap_name_uuid = BLE_UUID16_INIT(0x2a00);
 static const ble_uuid16_t gap_appearance_uuid = BLE_UUID16_INIT(0x2a01);
 
 static QueueHandle_t events;
+static QueueHandle_t medtrum_events;
 static uint16_t cmd_handle, data_handle, o5_data_handle;
 static uint16_t dex_handle[CGM_CHR_COUNT];
+static uint16_t medtrum_read_handle, medtrum_write_handle;
 static volatile uint16_t pod_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint16_t cgm_conn = BLE_HS_CONN_HANDLE_NONE;
+static volatile uint16_t medtrum_conn = BLE_HS_CONN_HANDLE_NONE;
+static volatile bool medtrum_status_notify;
 static uint8_t own_addr_type;
 static volatile bool synced;
 
@@ -75,6 +90,8 @@ static uint8_t adv_id[4], adv_pdm_id[4], adv_fault, adv_alerts;
 static bool cgm_adv_on;
 static char cgm_adv_name[16];
 static uint8_t cgm_adv_addr[6];
+static bool medtrum_adv_on;
+static uint8_t medtrum_adv_sn[4];
 
 static void push(uint8_t type, const uint8_t *data, size_t n)
 {
@@ -84,6 +101,17 @@ static void push(uint8_t type, const uint8_t *data, size_t n)
     }
     if (xQueueSend(events, &ev, 0) != pdTRUE) {
         ESP_LOGW(TAG, "event queue full: a packet from the phone was dropped");
+    }
+}
+
+static void push_medtrum(uint8_t type, const uint8_t *data, size_t n)
+{
+    medtrum_ev_t ev = {.type = type, .len = (uint8_t)n};
+    if (n) {
+        memcpy(ev.data, data, n);
+    }
+    if (xQueueSend(medtrum_events, &ev, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Medtrum event queue full: a packet from the phone was dropped");
     }
 }
 
@@ -133,6 +161,31 @@ static int dex_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gat
         cgm_app_on_write(chr, buf, len);
     }
     return rc;
+}
+
+/* ---- the Medtrum patch's characteristics ---------------------------------- */
+
+static int medtrum_read_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt,
+                               void *arg)
+{
+    /* The READ characteristic only carries notifications; a read is empty. */
+    return ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR ? 0 : BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+}
+
+static int medtrum_write_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt,
+                                void *arg)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+    }
+    uint8_t buf[MEDTRUM_FRAME_MAX];
+    uint16_t len = 0;
+    int rc = flat(ctxt->om, buf, sizeof buf, &len);
+    if (rc != 0 || conn_handle != medtrum_conn) {
+        return rc; /* another device's connection: ignored */
+    }
+    push_medtrum(MEDTRUM_EV_WRITE, buf, len);
+    return 0;
 }
 
 /* ---- GAP: the name depends on which device the phone connected to ---------- */
@@ -209,6 +262,26 @@ static const struct ble_gatt_svc_def services[] = {
                 {0},
             },
     },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &medtrum_svc_uuid.u,
+        .characteristics =
+            (struct ble_gatt_chr_def[]){
+                {
+                    .uuid = &medtrum_read_uuid.u,
+                    .access_cb = medtrum_read_access,
+                    .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                    .val_handle = &medtrum_read_handle,
+                },
+                {
+                    .uuid = &medtrum_write_uuid.u,
+                    .access_cb = medtrum_write_access,
+                    .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
+                    .val_handle = &medtrum_write_handle,
+                },
+                {0},
+            },
+    },
     {0},
 };
 
@@ -216,6 +289,7 @@ static const struct ble_gatt_svc_def services[] = {
 
 static int pod_gap_event(struct ble_gap_event *event, void *arg);
 static int cgm_gap_event(struct ble_gap_event *event, void *arg);
+static int medtrum_gap_event(struct ble_gap_event *event, void *arg);
 
 /* (Re)starts an advertising set with these fields, from addr (NULL: public). */
 static void adv_start(uint8_t instance, const struct ble_hs_adv_fields *fields, const struct ble_hs_adv_fields *rsp,
@@ -334,6 +408,40 @@ static void cgm_advertise_now(void)
     adv_start(CGM_INSTANCE, &fields, &rsp, addr, cgm_gap_event);
 }
 
+/* The Medtrum patch: the app scans for the name "MT" and reads the serial,
+ * device type and version out of the manufacturer data. It replaces the pod
+ * (they are mutually exclusive), so it uses the pod's advertising instance. */
+static void medtrum_advertise_now(void)
+{
+    if (!synced || medtrum_conn != BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    xSemaphoreTake(adv_mu, portMAX_DELAY);
+    bool on = medtrum_adv_on;
+    uint8_t sn[4];
+    memcpy(sn, medtrum_adv_sn, 4);
+    xSemaphoreGive(adv_mu);
+    if (!on) {
+        if (ble_gap_ext_adv_active(POD_INSTANCE)) {
+            ble_gap_ext_adv_stop(POD_INSTANCE);
+        }
+        return;
+    }
+    uint8_t mfg[8] = {0x00, 0x00, sn[0], sn[1], sn[2], sn[3], 1, 1};
+    struct ble_hs_adv_fields fields = {0};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.name = (const uint8_t *)"MT";
+    fields.name_len = 2;
+    fields.name_is_complete = 1;
+    fields.mfg_data = mfg;
+    fields.mfg_data_len = sizeof mfg;
+    struct ble_hs_adv_fields rsp = {0};
+    rsp.name = (const uint8_t *)"MT";
+    rsp.name_len = 2;
+    rsp.name_is_complete = 1;
+    adv_start(POD_INSTANCE, &fields, &rsp, NULL, medtrum_gap_event);
+}
+
 /* ---- connections -------------------------------------------------------------- */
 
 static int pod_gap_event(struct ble_gap_event *event, void *arg)
@@ -404,6 +512,45 @@ static int cgm_gap_event(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
+static int medtrum_gap_event(struct ble_gap_event *event, void *arg)
+{
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            medtrum_conn = event->connect.conn_handle;
+            ESP_LOGI(TAG, "phone connected to the Medtrum patch");
+            push_medtrum(MEDTRUM_EV_CONNECTED, NULL, 0);
+        } else {
+            medtrum_advertise_now();
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "phone disconnected from the Medtrum patch (reason 0x%x)", event->disconnect.reason);
+        medtrum_conn = BLE_HS_CONN_HANDLE_NONE;
+        medtrum_status_notify = false;
+        push_medtrum(MEDTRUM_EV_DISCONNECTED, NULL, 0);
+        medtrum_advertise_now();
+        break;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        if (medtrum_conn == BLE_HS_CONN_HANDLE_NONE) {
+            medtrum_advertise_now();
+        }
+        break;
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "Medtrum MTU %u", event->mtu.value);
+        break;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if (event->subscribe.attr_handle == medtrum_read_handle) {
+            medtrum_status_notify = event->subscribe.cur_notify || event->subscribe.cur_indicate;
+            ESP_LOGI(TAG, "Medtrum status notifications %s", medtrum_status_notify ? "on" : "off");
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
 static void on_sync(void)
 {
     ble_hs_util_ensure_addr(0);
@@ -413,7 +560,11 @@ static void on_sync(void)
     ESP_LOGI(TAG, "pod's Bluetooth address %02X:%02X:%02X:%02X:%02X:%02X", addr[5], addr[4], addr[3], addr[2],
              addr[1], addr[0]);
     synced = true;
+#if CONFIG_ESPSIM_DEVICE_MEDTRUM
+    medtrum_advertise_now();
+#else
     pod_advertise_now();
+#endif
     cgm_advertise_now();
 }
 
@@ -432,6 +583,7 @@ static void host_task(void *arg)
 void ble_start(void)
 {
     events = xQueueCreate(64, sizeof(dash_ev_t));
+    medtrum_events = xQueueCreate(16, sizeof(medtrum_ev_t));
     adv_mu = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(nimble_port_init());
     ble_hs_cfg.sync_cb = on_sync;
@@ -545,4 +697,55 @@ void ble_cgm_advertise(void *ctx, bool on, const char *name, const uint8_t addr[
     memcpy(cgm_adv_addr, addr, 6);
     xSemaphoreGive(adv_mu);
     cgm_advertise_now();
+}
+
+/* ---- the Medtrum patch: the radio half of medtrum_io_t --------------------------- */
+
+bool ble_medtrum_next_event(void *ctx, medtrum_ev_t *ev, uint32_t timeout_ms)
+{
+    TickType_t t = timeout_ms == MEDTRUM_WAIT_FOREVER ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    if (t == 0 && timeout_ms > 0) {
+        t = 1;
+    }
+    return xQueueReceive(medtrum_events, ev, t) == pdTRUE;
+}
+
+/* A command response, on the WRITE characteristic. */
+void ble_medtrum_notify(void *ctx, const uint8_t *p, size_t n)
+{
+    notify(medtrum_conn, medtrum_write_handle, p, n);
+}
+
+/* A status notification, on the READ characteristic. */
+void ble_medtrum_notify_status(void *ctx, const uint8_t *p, size_t n)
+{
+    if (medtrum_status_notify) {
+        notify(medtrum_conn, medtrum_read_handle, p, n);
+    }
+}
+
+void ble_medtrum_disconnect(void *ctx)
+{
+    uint16_t c = medtrum_conn;
+    if (c != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
+bool ble_medtrum_connected(void)
+{
+    return medtrum_conn != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void ble_medtrum_advertise(void *ctx, bool on, const uint8_t sn[4])
+{
+    xSemaphoreTake(adv_mu, portMAX_DELAY);
+    medtrum_adv_on = on;
+    if (sn) {
+        memcpy(medtrum_adv_sn, sn, 4);
+    }
+    xSemaphoreGive(adv_mu);
+    ESP_LOGI(TAG, "Medtrum %s, serial %02X%02X%02X%02X", on ? "advertising" : "not advertising",
+             medtrum_adv_sn[0], medtrum_adv_sn[1], medtrum_adv_sn[2], medtrum_adv_sn[3]);
+    medtrum_advertise_now();
 }
