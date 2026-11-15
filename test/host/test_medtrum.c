@@ -876,6 +876,84 @@ static void test_fault_mapping(void)
     }
 }
 
+/* ---- request reassembly ------------------------------------------------- */
+
+static void test_request_parser(void)
+{
+    medtrum_request_t r;
+
+    /* The 6-byte empty-content single packets: size + cmd + seq + pkg + CRC +
+     * the trailing 0x00 marker. Rejecting these was the P0 that stalled every
+     * connect (SYNCHRONIZE and friends). */
+    static const uint8_t sync[] = {0x05, 0x03, 0x00, 0x00, 0xfc, 0x00};
+    static const uint8_t get_time[] = {0x05, 0x0b, 0x00, 0x00, 0xa1, 0x00};
+    static const uint8_t prime[] = {0x05, 0x10, 0x00, 0x00, 0xa4, 0x00};
+    static const uint8_t resume[] = {0x05, 0x1d, 0x00, 0x00, 0x44, 0x00};
+    static const uint8_t stop[] = {0x05, 0x1f, 0x00, 0x00, 0xf8, 0x00};
+    static const uint8_t cancel_temp[] = {0x05, 0x19, 0x00, 0x00, 0xa7, 0x00};
+    const struct {
+        const uint8_t *p;
+        uint8_t cmd;
+    } empty[] = {
+        {sync, 3}, {get_time, 11}, {prime, 16}, {resume, 29}, {stop, 31}, {cancel_temp, 25},
+    };
+    for (size_t i = 0; i < sizeof empty / sizeof empty[0]; i++) {
+        medtrum_request_init(&r);
+        CHECK(medtrum_request_feed(&r, empty[i].p, 6));
+        CHECK(r.command == empty[i].cmd);
+        CHECK(r.sequence == 0);
+        CHECK(r.content_len == 0);
+    }
+
+    /* The 15-byte AUTH_REQ carries 9 content bytes. */
+    static const uint8_t auth[] = {0x0e, 0x05, 0x00, 0x00, 0x02, 0x9b, 0x02, 0x00,
+                                   0x00, 0x48, 0xcd, 0x12, 0x08, 0x24, 0x00};
+    medtrum_request_init(&r);
+    CHECK(medtrum_request_feed(&r, auth, sizeof auth));
+    CHECK(r.command == 5);
+    CHECK(r.content_len == 9);
+    CHECK_BYTES(r.content, r.content_len, auth + 4, 9);
+
+    /* A 2-fragment ACTIVATE reassembles into its 24-byte content. */
+    static const uint8_t act1[] = {29, 18, 0, 1, 0, 12, 1, 6, 0, 0, 30, 32, 3, 16, 14, 0, 0, 1, 3, 150};
+    static const uint8_t act2[] = {29, 18, 0, 2, 16, 14, 0, 0, 1, 2, 12, 12, 12, 217, 9};
+    medtrum_request_init(&r);
+    CHECK(!medtrum_request_feed(&r, act1, sizeof act1));
+    CHECK(medtrum_request_feed(&r, act2, sizeof act2));
+    CHECK(r.command == 18);
+    CHECK(r.sequence == 0);
+    CHECK(r.content_len == 24);
+    CHECK(memcmp(r.content, act1 + 4, 15) == 0); /* content[0..15] */
+    CHECK(memcmp(r.content + 15, act2 + 4, 9) == 0); /* content[15..24] */
+
+    /* A 3-fragment ACTIVATE. */
+    static const uint8_t a3_1[] = {41, 18, 0, 1, 0, 12, 0, 3, 0, 0, 30, 32, 3, 16, 14, 0, 0, 1, 7, 173};
+    static const uint8_t a3_2[] = {41, 18, 0, 2, 0, 160, 2, 240, 96, 2, 104, 33, 2, 224, 225, 1, 192, 3, 2, 253};
+    static const uint8_t a3_3[] = {41, 18, 0, 3, 236, 36, 2, 100, 133, 2, 144, 163};
+    medtrum_request_init(&r);
+    CHECK(!medtrum_request_feed(&r, a3_1, sizeof a3_1));
+    CHECK(!medtrum_request_feed(&r, a3_2, sizeof a3_2));
+    CHECK(medtrum_request_feed(&r, a3_3, sizeof a3_3));
+    CHECK(r.command == 18);
+    CHECK(r.content_len == 36);
+
+    /* A bad CRC, a frame shorter than the 6-byte minimum, and a continuation
+     * with the wrong fragment index are all rejected. */
+    uint8_t bad_crc[6] = {0x05, 0x03, 0x00, 0x00, 0xfc, 0x01};
+    medtrum_request_init(&r);
+    CHECK(!medtrum_request_feed(&r, bad_crc, sizeof bad_crc));
+
+    uint8_t tiny[5] = {0x05, 0x03, 0x00, 0x00, 0xfc};
+    medtrum_request_init(&r);
+    CHECK(!medtrum_request_feed(&r, tiny, sizeof tiny));
+
+    medtrum_request_init(&r);
+    CHECK(!medtrum_request_feed(&r, act1, sizeof act1));
+    uint8_t wrong_seq[9] = {23, 3, 4, 3, 6, 0, 0, 182, 224};
+    wrong_seq[8] = medtrum_crc8(wrong_seq, 8);
+    CHECK(!medtrum_request_feed(&r, wrong_seq, sizeof wrong_seq));
+}
+
 int main(void)
 {
     test_crc8();
@@ -895,6 +973,7 @@ int main(void)
     test_session_failures();
     test_lifecycle();
     test_fault_mapping();
+    test_request_parser();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

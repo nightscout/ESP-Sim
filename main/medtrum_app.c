@@ -8,6 +8,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +121,14 @@ static void save_state(void)
     store_save_medtrum(NULL, &st);
 }
 
+/* A fresh patch identity, as the reference assigns on activation. */
+static void assign_patch_id(void)
+{
+    uint8_t id[4];
+    esp_fill_random(id, sizeof id);
+    medtrum_patch_set_patch_id(&patch, id);
+}
+
 bool medtrum_app_state_valid(const medtrum_saved_t *st)
 {
     return st->magic == MEDTRUM_STATE_MAGIC && st->version == MEDTRUM_STATE_VERSION;
@@ -127,80 +136,9 @@ bool medtrum_app_state_valid(const medtrum_saved_t *st)
 
 /* ---- requests ----------------------------------------------------------- */
 
-static uint8_t req_buf[MEDTRUM_CONTENT_MAX + 1];
-static size_t req_len;
-static uint8_t req_cmd, req_seq;
-static bool req_active;
-
-/* Extracts a request's content. A single packet is header(4) + content + CRC
- * + the trailing 0x00 marker; a fragmented one is reassembled over several
- * writes, ending with the request's own CRC. Returns false while more
- * fragments are needed, or on a bad CRC. */
-static bool request_content(const uint8_t *data, size_t n, uint8_t *cmd, uint8_t *seq, uint8_t *content,
-                            size_t *content_len)
-{
-    if (n < 5) {
-        return false;
-    }
-    uint8_t size = data[0];
-    uint8_t pkg = data[3];
-
-    if (pkg == 0) {
-        if (n != (size_t)size + 1 || n < 7 || data[n - 1] != 0) {
-            return false;
-        }
-        if (medtrum_crc8(data, n - 2) != data[n - 2]) {
-            return false;
-        }
-        size_t clen = n - 6;
-        if (clen > MEDTRUM_CONTENT_MAX) {
-            return false;
-        }
-        memcpy(content, data + 4, clen);
-        *content_len = clen;
-        *cmd = data[1];
-        *seq = data[2];
-        return true;
-    }
-
-    if (medtrum_crc8(data, n - 1) != data[n - 1]) {
-        req_active = false;
-        return false;
-    }
-    if (pkg == 1) {
-        req_active = true;
-        req_cmd = data[1];
-        req_seq = data[2];
-        req_len = 0;
-    } else if (!req_active || req_cmd != data[1] || req_seq != data[2]) {
-        return false;
-    }
-    size_t chunk = n - 5;
-    if (req_len + chunk > sizeof req_buf) {
-        req_active = false;
-        return false;
-    }
-    memcpy(req_buf + req_len, data + 4, chunk);
-    req_len += chunk;
-    if (req_len < (size_t)size - 4) {
-        return false; /* more fragments coming */
-    }
-    if (req_len != (size_t)size - 4) {
-        req_active = false;
-        return false;
-    }
-    size_t clen = req_len - 1; /* the reassembled body ends with its CRC */
-    if (medtrum_crc8(req_buf, clen) != req_buf[clen]) {
-        req_active = false;
-        return false;
-    }
-    memcpy(content, req_buf, clen);
-    *content_len = clen;
-    *cmd = req_cmd;
-    *seq = req_seq;
-    req_active = false;
-    return true;
-}
+/* Reassembled by the component's parser (src/request.c), which the host tests
+ * cover directly. */
+static medtrum_request_t req;
 
 static void notify_status(void)
 {
@@ -213,22 +151,27 @@ static void notify_status(void)
 
 static void on_write(const uint8_t *data, size_t n)
 {
-    uint8_t cmd, seq;
-    uint8_t content[MEDTRUM_CONTENT_MAX];
-    size_t content_len = 0;
-    if (!request_content(data, n, &cmd, &seq, content, &content_len)) {
+    if (!medtrum_request_feed(&req, data, n)) {
         return;
     }
+    /* Only a command that changed the model needs a flash commit; a GET_TIME
+     * poll, a sync or a subscribe must not wear NVS. */
+    medtrum_status_t was_status = patch.status;
+    medtrum_delivery_t was_delivery = patch.delivery;
     medtrum_frag_t frags[MEDTRUM_FRAGS_MAX];
-    int count = medtrum_patch_handle(&patch, cmd, seq, content, content_len, frags, MEDTRUM_FRAGS_MAX);
+    int count = medtrum_patch_handle(&patch, req.command, req.sequence, req.content, req.content_len, frags,
+                                     MEDTRUM_FRAGS_MAX);
     if (count < 0) {
-        ESP_LOGW(TAG, "unhandled command %u", cmd);
+        ESP_LOGW(TAG, "unhandled command %u", req.command);
         return;
     }
     for (int i = 0; i < count; i++) {
         io.notify(io.ctx, frags[i].data, frags[i].len);
     }
-    save_state();
+    if (memcmp(&was_status, &patch.status, sizeof was_status) != 0 ||
+        memcmp(&was_delivery, &patch.delivery, sizeof was_delivery) != 0) {
+        save_state();
+    }
     notify_status();
 }
 
@@ -269,6 +212,7 @@ static void medtrum_task(void *arg)
 void medtrum_app_start(void)
 {
     mu = xSemaphoreCreateMutex();
+    medtrum_request_init(&req);
     medtrum_saved_t st;
     bool have = store_load_medtrum(&st) && medtrum_app_state_valid(&st);
     uint8_t sn[4] = MEDTRUM_DEFAULT_SN;
@@ -290,6 +234,11 @@ void medtrum_app_start(void)
         medtrum_patch_set_state(&patch, MEDTRUM_STATE_FILLED);
         medtrum_patch_set_reservoir(&patch, (uint16_t)(MEDTRUM_DEFAULT_UNITS * 20));
         medtrum_patch_set_battery(&patch, 5901296); /* 5.97 V / 2.81 V */
+        save_state();
+    }
+    if (patch.delivery.patch_id[0] == 0 && patch.delivery.patch_id[1] == 0 &&
+        patch.delivery.patch_id[2] == 0 && patch.delivery.patch_id[3] == 0) {
+        assign_patch_id();
         save_state();
     }
     ESP_LOGW(TAG, "simulating a Medtrum %s, serial %02X%02X%02X%02X. TEST EQUIPMENT: delivers nothing.",
@@ -315,6 +264,28 @@ static bool json_number(const char *j, const char *key, long *out)
     }
     char *end;
     long v = strtol(p, &end, 10);
+    if (end == p) {
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+/* The number after "key", as a float: the reservoir is set in 0.05 U steps. */
+static bool json_double(const char *j, const char *key, double *out)
+{
+    char pat[24];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(j, pat);
+    if (!p) {
+        return false;
+    }
+    p += strlen(pat);
+    while (*p == ' ' || *p == ':') {
+        p++;
+    }
+    char *end;
+    double v = strtod(p, &end);
     if (end == p) {
         return false;
     }
@@ -399,11 +370,13 @@ const char *medtrum_app_command(const char *body)
             io.advertise(io.ctx, true, patch.sn);
         });
     } else if (strcmp(cmd, "medtrumSetReservoir") == 0) {
-        if (!json_number(body, "units", &v) || v < 0 || v > 300) {
+        double units;
+        if (!json_double(body, "units", &units) || units < 0 || units > 300) {
             return "units is 0 to 300";
         }
         LOCKED({
-            medtrum_patch_set_reservoir(&patch, (uint16_t)(v * 20));
+            /* One pulse is 0.05 U; round 186.8 to 3736 pulses. */
+            medtrum_patch_set_reservoir(&patch, (uint16_t)lround(units / 0.05));
             save_state();
         });
     } else if (strcmp(cmd, "medtrumSetState") == 0) {
@@ -434,6 +407,7 @@ const char *medtrum_app_command(const char *body)
             medtrum_patch_set_state(&patch, MEDTRUM_STATE_FILLED);
             medtrum_patch_set_reservoir(&patch, (uint16_t)(MEDTRUM_DEFAULT_UNITS * 20));
             medtrum_patch_set_battery(&patch, 5901296);
+            assign_patch_id();
             save_state();
         });
     } else {

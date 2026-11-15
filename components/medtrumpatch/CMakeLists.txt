@@ -5,6 +5,7 @@ idf_component_register(
         src/crypto.c
         src/delivery.c
         src/frame.c
+        src/request.c
         src/session.c
         src/status.c
     INCLUDE_DIRS include

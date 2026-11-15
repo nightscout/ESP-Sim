@@ -171,6 +171,26 @@ int medtrum_encode_response(uint8_t command, uint8_t sequence, uint16_t response
                             const uint8_t *payload, size_t payload_len, medtrum_frag_t *frags,
                             size_t max_frags);
 
+/* Reassembles a request from the phone's writes. A request is header(4) +
+ * content + CRC-8, with a trailing 0x00 marker on a single packet; a
+ * fragmented request ends with its own CRC instead of a marker. */
+typedef struct {
+    uint8_t command;
+    uint8_t sequence;
+    uint8_t content[MEDTRUM_CONTENT_MAX];
+    size_t content_len;
+    uint8_t buf[MEDTRUM_CONTENT_MAX + 1]; /* content + CRC while fragmenting */
+    size_t len;
+    bool active;
+} medtrum_request_t;
+
+void medtrum_request_init(medtrum_request_t *r);
+/* Feeds one write. Returns true once a complete request is assembled (its
+ * command, sequence, content and content_len are then valid), or false while
+ * more fragments are needed or on a bad frame. An empty-content single packet
+ * is the 6-byte size + cmd + seq + pkg + CRC + 0x00 form. */
+bool medtrum_request_feed(medtrum_request_t *r, const uint8_t *frag, size_t n);
+
 /* ---- patch state (MedtrumKit/Packets/Enums/PatchState.swift) ----------- */
 
 typedef enum {
