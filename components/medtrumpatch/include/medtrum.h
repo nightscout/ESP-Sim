@@ -161,6 +161,152 @@ bool medtrum_complete(const medtrum_packet_t *p);
  * hasEnoughData). */
 bool medtrum_has_enough(const medtrum_packet_t *p, size_t minimum);
 
+/* Encodes a response: header(4) + responseCode(2) + payload, with the size
+ * byte counting the header, responseCode and payload but not the CRC (unlike
+ * a request, whose size byte includes the CRC). A single-packet response has
+ * no trailing marker. Fragments are 15-byte chunks of (responseCode +
+ * payload); the reassembled packet carries no inner CRC. Returns the number
+ * of fragments, or -1. */
+int medtrum_encode_response(uint8_t command, uint8_t sequence, uint16_t response_code,
+                            const uint8_t *payload, size_t payload_len, medtrum_frag_t *frags,
+                            size_t max_frags);
+
+/* ---- patch state (MedtrumKit/Packets/Enums/PatchState.swift) ----------- */
+
+typedef enum {
+    MEDTRUM_STATE_NONE = 0,
+    MEDTRUM_STATE_IDLE = 1,
+    MEDTRUM_STATE_FILLED = 2,
+    MEDTRUM_STATE_PRIMING = 3,
+    MEDTRUM_STATE_PRIMED = 4,
+    MEDTRUM_STATE_EJECTING = 5,
+    MEDTRUM_STATE_EJECTED = 6,
+    MEDTRUM_STATE_ACTIVE = 32,
+    MEDTRUM_STATE_ACTIVE_ALT = 33,
+    MEDTRUM_STATE_LOW_BG_SUSPENDED = 64,
+    MEDTRUM_STATE_LOW_BG_SUSPENDED2 = 65,
+    MEDTRUM_STATE_AUTO_SUSPENDED = 66,
+    MEDTRUM_STATE_HOURLY_MAX_SUSPENDED = 67,
+    MEDTRUM_STATE_DAILY_MAX_SUSPENDED = 68,
+    MEDTRUM_STATE_SUSPENDED = 69,
+    MEDTRUM_STATE_PAUSED = 70,
+    MEDTRUM_STATE_OCCLUSION = 96,
+    MEDTRUM_STATE_EXPIRED = 97,
+    MEDTRUM_STATE_RESERVOIR_EMPTY = 98,
+    MEDTRUM_STATE_PATCH_FAULT = 99,
+    MEDTRUM_STATE_PATCH_FAULT2 = 100,
+    MEDTRUM_STATE_BASE_FAULT = 101,
+    MEDTRUM_STATE_BATTERY_OUT = 102,
+    MEDTRUM_STATE_NO_CALIBRATION = 103,
+    MEDTRUM_STATE_STOPPED = 128,
+} medtrum_state_t;
+
+/* The classifications PatchState computes (phase, isSuspended, isFault, ...). */
+bool medtrum_state_is_setup(uint8_t state);
+bool medtrum_state_is_running(uint8_t state);
+bool medtrum_state_is_terminated(uint8_t state);
+bool medtrum_state_is_suspended(uint8_t state);
+bool medtrum_state_is_fault(uint8_t state);
+bool medtrum_state_is_delivery_halted(uint8_t state);
+bool medtrum_state_before_priming(uint8_t state);
+bool medtrum_state_completed_priming(uint8_t state);
+
+/* ---- status fields (MedtrumKit/Packets/NotificationPacket.swift) ------- */
+
+/* The field mask: a field is present in the payload iff its bit is set. The
+ * payload order is fixed by MedtrumKit's `fields`, not by the bit order. */
+enum {
+    MEDTRUM_MASK_SUSPEND = 0x0001,
+    MEDTRUM_MASK_NORMAL_BOLUS = 0x0002,
+    MEDTRUM_MASK_EXTENDED_BOLUS = 0x0004,
+    MEDTRUM_MASK_BASAL = 0x0008,
+    MEDTRUM_MASK_SETUP = 0x0010,
+    MEDTRUM_MASK_RESERVOIR = 0x0020,
+    MEDTRUM_MASK_START_TIME = 0x0040,
+    MEDTRUM_MASK_BATTERY = 0x0080,
+    MEDTRUM_MASK_STORAGE = 0x0100,
+    MEDTRUM_MASK_ALARM = 0x0200,
+    MEDTRUM_MASK_AGE = 0x0400,
+    MEDTRUM_MASK_MAGNETO_PLACE = 0x0800,
+    MEDTRUM_MASK_UNUSED_CGM = 0x1000,
+    MEDTRUM_MASK_UNUSED_COMMAND_CONFIRM = 0x2000,
+    MEDTRUM_MASK_UNUSED_AUTO_STATUS = 0x4000,
+    MEDTRUM_MASK_UNUSED_LEGACY = 0x8000,
+};
+
+/* The largest status payload: state + mask + every field. */
+#define MEDTRUM_STATUS_MAX 64
+
+/* A patch's reported status, in the wire representation: times are Medtrum
+ * seconds, insulin values are pulses of 0.05 U. Only the fields whose mask
+ * bit is set are emitted, in MedtrumKit's fixed order. */
+typedef struct {
+    uint8_t state;  /* medtrum_state_t */
+    uint16_t mask;  /* MEDTRUM_MASK_* bits */
+
+    uint32_t suspend_time;      /* MASK_SUSPEND */
+    uint8_t bolus_type;         /* MASK_NORMAL_BOLUS: low 7 bits */
+    bool bolus_completed;       /* MASK_NORMAL_BOLUS: bit 7 */
+    uint16_t bolus_delivered;   /* pulses */
+    uint8_t extended_bolus[3];  /* MASK_EXTENDED_BOLUS, raw */
+    uint8_t basal_type;         /* MASK_BASAL */
+    uint16_t basal_sequence;
+    uint16_t basal_patch_id;
+    uint32_t basal_start_time;  /* Medtrum seconds */
+    uint16_t basal_rate;        /* pulses of 0.05 U/h, low 12 bits */
+    uint16_t basal_delivery;    /* pulses, high bits */
+    uint8_t prime_progress;     /* MASK_SETUP */
+    uint16_t reservoir;         /* pulses of 0.05 U */
+    uint32_t start_time;        /* MASK_START_TIME, Medtrum seconds */
+    uint32_t battery;           /* MASK_BATTERY, raw 24 bits */
+    uint16_t storage_sequence;  /* MASK_STORAGE */
+    uint16_t storage_patch_id;
+    uint16_t alarm_flags;       /* MASK_ALARM */
+    uint8_t alarm_unused[2];
+    uint32_t patch_age;         /* MASK_AGE, seconds */
+    uint16_t magneto_placement; /* MASK_MAGNETO_PLACE */
+    uint8_t unused_cgm[5];      /* MASK_UNUSED_CGM */
+    uint8_t unused_command_confirm[2];
+    uint8_t unused_auto_status[2];
+    uint8_t unused_legacy[2];
+} medtrum_status_t;
+
+/* Builds the notification payload: state, mask (little-endian), then each
+ * masked field in MedtrumKit's order. Returns the length, or 0 if out is too
+ * small. This is both the READ-characteristic notification and the body of a
+ * SYNCHRONIZE response. */
+size_t medtrum_status_payload(const medtrum_status_t *st, uint8_t *out, size_t cap);
+
+/* ---- the patch and its connect session --------------------------------- */
+
+typedef struct {
+    uint8_t sn[4];          /* the logical serial, as the app knows it */
+    uint8_t device_type;
+    uint8_t sw_version[3];
+    uint8_t session_token[4]; /* the last token the app authenticated with */
+    bool authenticated;
+    bool subscribed;
+    uint16_t subscribe_mask;
+    /* The captured SYNCHRONIZE responses carry one extra trailing byte that
+     * the client ignores; a real patch always seems to send it. */
+    uint8_t sync_tail;
+    medtrum_status_t status;
+} medtrum_patch_t;
+
+void medtrum_patch_init(medtrum_patch_t *p, const uint8_t sn[4]);
+void medtrum_patch_set_state(medtrum_patch_t *p, uint8_t state);
+
+/* Builds the READ-characteristic notification for the current status. */
+size_t medtrum_patch_notification(const medtrum_patch_t *p, uint8_t *out, size_t cap);
+
+/* Handles one session request. `content` is the request body (a decoded
+ * request's bytes after the 4-byte header, with the trailing marker and CRC
+ * already stripped). Writes the response fragments into `frags` and returns
+ * their count, 0 for no response, or -1 if the command is not part of the
+ * session. */
+int medtrum_patch_handle(medtrum_patch_t *p, uint8_t command, uint8_t sequence, const uint8_t *content,
+                         size_t content_len, medtrum_frag_t *frags, size_t max_frags);
+
 #ifdef __cplusplus
 }
 #endif

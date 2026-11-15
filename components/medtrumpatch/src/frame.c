@@ -135,6 +135,78 @@ void medtrum_decode(medtrum_packet_t *p, const uint8_t *frag, size_t n)
     }
 }
 
+int medtrum_encode_response(uint8_t command, uint8_t sequence, uint16_t response_code,
+                            const uint8_t *payload, size_t payload_len, medtrum_frag_t *frags,
+                            size_t max_frags)
+{
+    /* header(4) + responseCode(2) + payload must fit the size byte. */
+    if (frags == NULL || payload_len > 249) {
+        return -1;
+    }
+
+    uint8_t buf[6 + 250];
+    size_t buf_len = 6 + payload_len;
+    buf[0] = (uint8_t)buf_len;
+    buf[1] = command;
+    buf[2] = sequence;
+    buf[3] = 0; /* pkgIndex */
+    buf[4] = (uint8_t)response_code;
+    buf[5] = (uint8_t)(response_code >> 8);
+    if (payload_len > 0) {
+        memcpy(buf + 6, payload, payload_len);
+    }
+
+    if (buf_len - 4 <= SINGLE_PACKET_MAX) {
+        if (max_frags < 1) {
+            return -1;
+        }
+        memcpy(frags[0].data, buf, buf_len);
+        frags[0].data[buf_len] = medtrum_crc8(buf, buf_len);
+        frags[0].len = buf_len + 1;
+        return 1;
+    }
+
+    /* A response fragments (responseCode + payload): no inner CRC, and no
+     * trailing single-packet marker. */
+    size_t off = 4;
+    size_t remaining = buf_len - 4;
+    size_t count = 0;
+    uint8_t pkg_index = 1;
+
+    while (remaining > SINGLE_PACKET_MAX) {
+        if (count >= max_frags) {
+            return -1;
+        }
+        uint8_t *out = frags[count].data;
+        out[0] = buf[0];
+        out[1] = command;
+        out[2] = sequence;
+        out[3] = pkg_index;
+        memcpy(out + 4, buf + off, SINGLE_PACKET_MAX);
+        out[4 + SINGLE_PACKET_MAX] = medtrum_crc8(out, 4 + SINGLE_PACKET_MAX);
+        frags[count].len = 4 + SINGLE_PACKET_MAX + 1;
+        count++;
+        pkg_index++;
+        off += SINGLE_PACKET_MAX;
+        remaining -= SINGLE_PACKET_MAX;
+    }
+
+    if (count >= max_frags) {
+        return -1;
+    }
+    uint8_t *out = frags[count].data;
+    out[0] = buf[0];
+    out[1] = command;
+    out[2] = sequence;
+    out[3] = pkg_index;
+    memcpy(out + 4, buf + off, remaining);
+    out[4 + remaining] = medtrum_crc8(out, 4 + remaining);
+    frags[count].len = 4 + remaining + 1;
+    count++;
+
+    return (int)count;
+}
+
 bool medtrum_complete(const medtrum_packet_t *p)
 {
     return p->len == p->data_size;

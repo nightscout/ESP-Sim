@@ -357,6 +357,288 @@ static void test_io(void)
     CHECK_BYTES(token, 4, ((uint8_t[]){0, 0, 0, 0}), 4);
 }
 
+/* ---- the status payload and the state machine -------------------------- */
+
+static void test_status_payload(void)
+{
+    /* SynchronizeNotificationPacketTests.swift, reproduced byte for byte. */
+    static const uint8_t basal_want[] = {32, 40, 64, 6,  25, 0,  14, 0,  84, 163,
+                                         173, 17, 17, 64, 0, 152, 14, 0,  16};
+    static const uint8_t storage_want[] = {32, 0, 17, 167, 0, 14, 0, 0, 0, 0, 0, 0};
+    static const uint8_t bolus_want[] = {32, 34, 16, 0, 3, 0, 198, 12, 0, 0, 0, 0, 0};
+
+    medtrum_status_t st;
+    uint8_t out[MEDTRUM_STATUS_MAX];
+    size_t n;
+
+    /* testBasalDataProvided: absolute temp 0.85 U/h, reservoir 186.8 U. */
+    memset(&st, 0, sizeof st);
+    st.state = MEDTRUM_STATE_ACTIVE;
+    st.mask = MEDTRUM_MASK_BASAL | MEDTRUM_MASK_RESERVOIR | MEDTRUM_MASK_UNUSED_AUTO_STATUS;
+    st.basal_type = 6; /* BasalType.ABSOLUTE_TEMP */
+    st.basal_sequence = 25;
+    st.basal_patch_id = 14;
+    st.basal_start_time = 296592212; /* 1685126612 - the Medtrum epoch */
+    st.basal_rate = 17;
+    st.basal_delivery = 4;
+    st.reservoir = 3736;
+    st.unused_auto_status[1] = 16;
+    n = medtrum_status_payload(&st, out, sizeof out);
+    CHECK_BYTES(out, n, basal_want, sizeof basal_want);
+
+    /* testSequenceDataProvided: storage sequence 167, patch 14. */
+    memset(&st, 0, sizeof st);
+    st.state = MEDTRUM_STATE_ACTIVE;
+    st.mask = MEDTRUM_MASK_STORAGE | MEDTRUM_MASK_UNUSED_CGM;
+    st.storage_sequence = 167;
+    st.storage_patch_id = 14;
+    n = medtrum_status_payload(&st, out, sizeof out);
+    CHECK_BYTES(out, n, storage_want, sizeof storage_want);
+
+    /* testBolusProgress: 0.15 U delivered, reservoir 163.5 U. */
+    memset(&st, 0, sizeof st);
+    st.state = MEDTRUM_STATE_ACTIVE;
+    st.mask = MEDTRUM_MASK_NORMAL_BOLUS | MEDTRUM_MASK_RESERVOIR | MEDTRUM_MASK_UNUSED_CGM;
+    st.bolus_delivered = 3;
+    st.reservoir = 3270;
+    n = medtrum_status_payload(&st, out, sizeof out);
+    CHECK_BYTES(out, n, bolus_want, sizeof bolus_want);
+
+    /* testStateOnlyNotification: state, an empty mask, nothing else. */
+    memset(&st, 0, sizeof st);
+    st.state = MEDTRUM_STATE_RESERVOIR_EMPTY;
+    n = medtrum_status_payload(&st, out, sizeof out);
+    CHECK(n == 3);
+    CHECK(out[0] == 98 && out[1] == 0 && out[2] == 0);
+
+    /* Refuses a buffer that is too small. */
+    CHECK(medtrum_status_payload(&st, out, 2) == 0);
+}
+
+static void test_patch_state(void)
+{
+    CHECK(medtrum_state_is_setup(MEDTRUM_STATE_IDLE));
+    CHECK(medtrum_state_is_setup(MEDTRUM_STATE_FILLED));
+    CHECK(medtrum_state_is_setup(MEDTRUM_STATE_PRIMING));
+    CHECK(medtrum_state_is_setup(MEDTRUM_STATE_PRIMED));
+    CHECK(!medtrum_state_is_setup(MEDTRUM_STATE_ACTIVE));
+    CHECK(medtrum_state_is_running(MEDTRUM_STATE_ACTIVE));
+    CHECK(medtrum_state_is_running(MEDTRUM_STATE_SUSPENDED));
+    CHECK(!medtrum_state_is_running(MEDTRUM_STATE_FILLED));
+    CHECK(medtrum_state_is_suspended(MEDTRUM_STATE_SUSPENDED));
+    CHECK(medtrum_state_is_suspended(MEDTRUM_STATE_AUTO_SUSPENDED));
+    CHECK(!medtrum_state_is_suspended(MEDTRUM_STATE_ACTIVE));
+    CHECK(medtrum_state_is_fault(MEDTRUM_STATE_OCCLUSION));
+    CHECK(medtrum_state_is_fault(MEDTRUM_STATE_PATCH_FAULT));
+    CHECK(medtrum_state_is_fault(MEDTRUM_STATE_RESERVOIR_EMPTY));
+    CHECK(medtrum_state_is_terminated(MEDTRUM_STATE_STOPPED));
+    CHECK(medtrum_state_is_delivery_halted(MEDTRUM_STATE_SUSPENDED));
+    CHECK(medtrum_state_is_delivery_halted(MEDTRUM_STATE_RESERVOIR_EMPTY));
+    CHECK(!medtrum_state_is_delivery_halted(MEDTRUM_STATE_ACTIVE));
+    CHECK(medtrum_state_before_priming(MEDTRUM_STATE_FILLED));
+    CHECK(!medtrum_state_before_priming(MEDTRUM_STATE_PRIMED));
+    CHECK(medtrum_state_completed_priming(MEDTRUM_STATE_PRIMED));
+}
+
+/* ---- the connect session ----------------------------------------------- */
+
+/* Fills a patch with the status of SynchronizePacketTests' fragment vector. */
+static void patch_filled(medtrum_patch_t *p)
+{
+    medtrum_patch_init(p, (uint8_t[]){0, 0, 0, 0});
+    p->authenticated = true;
+    p->status.state = MEDTRUM_STATE_FILLED;
+    p->status.mask = MEDTRUM_MASK_RESERVOIR | MEDTRUM_MASK_BATTERY | MEDTRUM_MASK_STORAGE | MEDTRUM_MASK_AGE;
+    p->status.reservoir = 3899;
+    p->status.battery = 5913476;
+    p->status.storage_sequence = 1;
+    p->status.storage_patch_id = 50;
+    p->status.patch_age = 1646;
+    p->sync_tail = 182;
+}
+
+/* SynchronizePacketTests.swift: testResponseGivenSplittedPackets. */
+static void test_sync_fragment_vector(void)
+{
+    static const uint8_t f1[] = {23, 3, 4, 1, 0, 0, 2, 160, 5, 59, 15, 132, 59, 90, 1, 0, 50, 0, 110, 48};
+    static const uint8_t f2[] = {23, 3, 4, 2, 6, 0, 0, 182, 224};
+
+    medtrum_patch_t p;
+    patch_filled(&p);
+
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+    int n = medtrum_patch_handle(&p, MEDTRUM_CMD_SYNCHRONIZE, 4, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 2);
+    if (n == 2) {
+        CHECK_BYTES(resp[0].data, resp[0].len, f1, sizeof f1);
+        CHECK_BYTES(resp[1].data, resp[1].len, f2, sizeof f2);
+    }
+}
+
+/* SynchronizePacketTests.swift: testResponseContainingSyncData, with the
+ * state the test asserts. */
+static void test_sync_full_vector(void)
+{
+    static const uint8_t f1[] = {47, 3, 3, 1, 0,  0,  32, 238, 13, 128, 5,  0,  128, 0,  0,  6, 25, 0, 14, 150};
+    static const uint8_t f2[] = {47, 3, 3, 2, 0,  84, 163, 173, 17, 17, 64, 0,  152, 14, 248, 137, 173, 17, 240, 202};
+    static const uint8_t f3[] = {47, 3, 3, 3, 11, 90, 26, 0, 14, 0, 187, 31, 0, 0, 140, 14, 200, 238};
+    static const uint8_t total[] = {47, 3, 3, 1, 0,  0,  32, 238, 13, 128, 5,  0,  128, 0,  0,  6,  25, 0, 14, 0,
+                                    84, 163, 173, 17, 17, 64, 0,  152, 14, 248, 137, 173, 17, 240, 11, 90, 26, 0, 14, 0,
+                                    187, 31, 0, 0, 140, 14, 200};
+
+    medtrum_patch_t p;
+    medtrum_patch_init(&p, (uint8_t[]){0, 0, 0, 0});
+    p.authenticated = true;
+    p.status.state = MEDTRUM_STATE_ACTIVE;
+    p.status.mask = MEDTRUM_MASK_NORMAL_BOLUS | MEDTRUM_MASK_EXTENDED_BOLUS | MEDTRUM_MASK_BASAL |
+                    MEDTRUM_MASK_RESERVOIR | MEDTRUM_MASK_START_TIME | MEDTRUM_MASK_BATTERY |
+                    MEDTRUM_MASK_STORAGE | MEDTRUM_MASK_AGE | MEDTRUM_MASK_MAGNETO_PLACE;
+    p.status.bolus_completed = true;
+    p.status.bolus_delivered = 5;
+    p.status.extended_bolus[0] = 128;
+    p.status.basal_type = 6;
+    p.status.basal_sequence = 25;
+    p.status.basal_patch_id = 14;
+    p.status.basal_start_time = 296592212;
+    p.status.basal_rate = 17;
+    p.status.basal_delivery = 4;
+    p.status.reservoir = 3736;
+    p.status.start_time = 296585720;
+    p.status.battery = 5901296;
+    p.status.storage_sequence = 26;
+    p.status.storage_patch_id = 14;
+    p.status.patch_age = 8123;
+    p.status.magneto_placement = 3724;
+    p.sync_tail = 200;
+
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+    int n = medtrum_patch_handle(&p, MEDTRUM_CMD_SYNCHRONIZE, 3, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 3);
+    if (n == 3) {
+        CHECK_BYTES(resp[0].data, resp[0].len, f1, sizeof f1);
+        CHECK_BYTES(resp[1].data, resp[1].len, f2, sizeof f2);
+        CHECK_BYTES(resp[2].data, resp[2].len, f3, sizeof f3);
+    }
+
+    medtrum_packet_t pkt;
+    medtrum_decode_init(&pkt, MEDTRUM_CMD_SYNCHRONIZE);
+    for (int i = 0; i < n; i++) {
+        medtrum_decode(&pkt, resp[i].data, resp[i].len);
+    }
+    CHECK(!pkt.failed);
+    CHECK(medtrum_complete(&pkt));
+    CHECK_BYTES(pkt.data, pkt.len, total, sizeof total);
+    CHECK(pkt.data[6] == MEDTRUM_STATE_ACTIVE);
+}
+
+/* A simulated phone: AUTH_REQ -> SYNCHRONIZE -> SUBSCRIBE. */
+static void test_session(void)
+{
+    static const uint8_t auth_want[] = {11, 5, 0, 0, 0, 0, 2, 80, 12, 1, 3, 49};
+    static const uint8_t sync1_want[] = {23, 3, 1, 1, 0, 0, 2, 160, 5, 59, 15, 132, 59, 90, 1, 0, 50, 0, 110, 132};
+    static const uint8_t sync2_want[] = {23, 3, 1, 2, 6, 0, 0, 182, 223};
+    static const uint8_t sub_want[] = {7, 4, 2, 0, 0, 0, 2, 177};
+
+    medtrum_patch_t p;
+    uint8_t sn[4] = {217, 249, 118, 170}; /* the app's serial */
+    patch_filled(&p);
+    memcpy(p.sn, sn, 4);
+    p.device_type = 80;
+    p.sw_version[0] = 12;
+    p.sw_version[1] = 1;
+    p.sw_version[2] = 3;
+
+    /* The phone's AUTH_REQ: role 2, its token, key = genKey(reversed SN). */
+    uint8_t reversed[4] = {sn[3], sn[2], sn[1], sn[0]};
+    uint8_t key[4];
+    medtrum_gen_key(reversed, key);
+    uint8_t content[9] = {2, 155, 2, 0, 0, key[0], key[1], key[2], key[3]};
+
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+    int n = medtrum_patch_handle(&p, MEDTRUM_CMD_AUTH_REQ, 0, content, sizeof content, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.authenticated);
+    CHECK_BYTES(p.session_token, 4, ((uint8_t[]){155, 2, 0, 0}), 4);
+    if (n == 1) {
+        CHECK_BYTES(resp[0].data, resp[0].len, auth_want, sizeof auth_want);
+    }
+
+    /* SYNCHRONIZE, sequence 1. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SYNCHRONIZE, 1, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 2);
+    if (n == 2) {
+        CHECK_BYTES(resp[0].data, resp[0].len, sync1_want, sizeof sync1_want);
+        CHECK_BYTES(resp[1].data, resp[1].len, sync2_want, sizeof sync2_want);
+    }
+    medtrum_packet_t pkt;
+    medtrum_decode_init(&pkt, MEDTRUM_CMD_SYNCHRONIZE);
+    for (int i = 0; i < n; i++) {
+        medtrum_decode(&pkt, resp[i].data, resp[i].len);
+    }
+    CHECK(!pkt.failed);
+    CHECK(medtrum_complete(&pkt));
+    CHECK(pkt.response_code == MEDTRUM_RESPONSE_OK);
+    CHECK(pkt.data[6] == MEDTRUM_STATE_FILLED);
+    CHECK((pkt.data[7] | (pkt.data[8] << 8)) == p.status.mask);
+    CHECK((pkt.data[9] | (pkt.data[10] << 8)) == 3899);
+
+    /* SUBSCRIBE, sequence 2, with the 0x0FFF mask. */
+    uint8_t sub[2] = {0xff, 0x0f};
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SUBSCRIBE, 2, sub, sizeof sub, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.subscribed);
+    CHECK(p.subscribe_mask == 0x0fff);
+    if (n == 1) {
+        CHECK_BYTES(resp[0].data, resp[0].len, sub_want, sizeof sub_want);
+    }
+
+    /* The READ-characteristic notification is the bare status payload. */
+    uint8_t note[MEDTRUM_STATUS_MAX];
+    size_t note_len = medtrum_patch_notification(&p, note, sizeof note);
+    CHECK(note_len == 16); /* state + mask + reservoir + battery + storage + age */
+    CHECK(note[0] == MEDTRUM_STATE_FILLED);
+    CHECK((note[1] | (note[2] << 8)) == p.status.mask);
+}
+
+static void test_session_failures(void)
+{
+    medtrum_patch_t p;
+    medtrum_patch_init(&p, (uint8_t[]){217, 249, 118, 170});
+    p.device_type = 80;
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+    medtrum_packet_t pkt;
+
+    /* A wrong key is refused with responseCode 7. */
+    uint8_t bad[9] = {2, 155, 2, 0, 0, 0, 0, 0, 0};
+    int n = medtrum_patch_handle(&p, MEDTRUM_CMD_AUTH_REQ, 0, bad, sizeof bad, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(!p.authenticated);
+    if (n == 1) {
+        medtrum_decode_init(&pkt, MEDTRUM_CMD_AUTH_REQ);
+        medtrum_decode(&pkt, resp[0].data, resp[0].len);
+        CHECK(!pkt.failed);
+        CHECK(pkt.response_code == MEDTRUM_RESPONSE_BAD_TOKEN);
+    }
+
+    /* SYNCHRONIZE before authentication is refused too. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SYNCHRONIZE, 1, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    if (n == 1) {
+        medtrum_decode_init(&pkt, MEDTRUM_CMD_SYNCHRONIZE);
+        medtrum_decode(&pkt, resp[0].data, resp[0].len);
+        CHECK(pkt.response_code == MEDTRUM_RESPONSE_BAD_TOKEN);
+    }
+
+    /* A command outside the session is left for the caller. */
+    CHECK(medtrum_patch_handle(&p, MEDTRUM_CMD_SET_BOLUS, 0, NULL, 0, resp, MEDTRUM_FRAGS_MAX) == -1);
+
+    /* A response payload that will not fit the size byte is refused. */
+    uint8_t big[250];
+    memset(big, 0, sizeof big);
+    CHECK(medtrum_encode_response(MEDTRUM_CMD_SYNCHRONIZE, 0, 0, big, sizeof big, resp, MEDTRUM_FRAGS_MAX) ==
+          -1);
+}
+
 int main(void)
 {
     test_crc8();
@@ -368,6 +650,12 @@ int main(void)
     test_decode_failures();
     test_round_trip();
     test_io();
+    test_status_payload();
+    test_patch_state();
+    test_sync_fragment_vector();
+    test_sync_full_vector();
+    test_session();
+    test_session_failures();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
