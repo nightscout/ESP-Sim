@@ -121,11 +121,14 @@ static void save_state(void)
     store_save_medtrum(NULL, &st);
 }
 
-/* A fresh patch identity, as the reference assigns on activation. */
+/* A fresh patch identity, as the reference assigns on activation. The app
+ * validates every later notification against a 16-bit patch id
+ * (basal.patchId / storage.patchId), so only the low two bytes are random;
+ * the high two stay zero. */
 static void assign_patch_id(void)
 {
-    uint8_t id[4];
-    esp_fill_random(id, sizeof id);
+    uint8_t id[4] = {0, 0, 0, 0};
+    esp_fill_random(id, 2);
     medtrum_patch_set_patch_id(&patch, id);
 }
 
