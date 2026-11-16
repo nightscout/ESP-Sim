@@ -57,14 +57,20 @@ static void tick_task(void *arg)
     }
 }
 
+/* The G6 a board with nothing saved comes up as. A G6 has no discovery of its
+ * own -- the app has to be told the transmitter id -- so it is a fixed, known
+ * one rather than a random one the panel would have to be read to find. */
+static const char default_g6_id[] = "81AB7Q";
+
 void cgm_app_start(void)
 {
     mu = xSemaphoreCreateMutex();
     cgm_state_t st;
     if (!store_load_cgm(&st)) {
-        memset(&st, 0, sizeof st);
-        st.version = CGM_STATE_VERSION;
-        st.kind = CGM_OFF;
+        /* A blank board starts as a G6 rather than with the CGM off, so a
+         * fresh flash is usable without reaching the panel first. Only a board
+         * with nothing saved gets this: a saved CGM always wins. */
+        cgm_state_fresh(&st, CGM_G6, default_g6_id, now_s(NULL));
     }
     cgm_init(&cgm, &st, &io);
     if (st.kind != CGM_OFF) {

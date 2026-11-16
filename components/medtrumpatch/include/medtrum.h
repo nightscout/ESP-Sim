@@ -98,8 +98,10 @@ typedef struct {
     /* Sends a notification or a command response to the connected phone. */
     void (*notify)(void *ctx, const uint8_t *p, size_t n);
     void (*disconnect)(void *ctx);
-    /* Advertises (on) as a Medtrum patch with this serial, or stops. */
-    void (*advertise)(void *ctx, bool on, const uint8_t sn[4]);
+    /* Advertises (on) as a Medtrum patch with this serial and device type, or
+     * stops. The type is the byte a scanning app reads the reservoir from, so
+     * it has to match the model the serial names. */
+    void (*advertise)(void *ctx, bool on, const uint8_t sn[4], uint8_t device_type);
     int64_t (*now_ms)(void *ctx);
     void (*random)(void *ctx, uint8_t *p, size_t n);
     void (*log)(void *ctx, const char *msg);
@@ -321,9 +323,21 @@ enum {
 /* The largest basal profile MedtrumKit sends: count + entries of 3 bytes. */
 #define MEDTRUM_BASAL_PROFILE_MAX 150
 
+/* How long the simulated patch primes for before it reports PRIMED. A real
+ * base primes itself: MedtrumKit sends PRIME, returns as soon as the write
+ * succeeds, and then waits for the patch's own status to reach PRIMED (it has
+ * no timeout of its own). So the progress and the change have to come from
+ * here, or the app sits on "Priming..." for ever.
+ *
+ * A real patch takes minutes; this is deliberately much shorter, because it is
+ * only ever a bench wait. The tick is 1 Hz, so this is also the number of
+ * progress steps the app sees. 0 primes on the first tick; 30 shows more of
+ * the progress UI. The panel can still set the state and progress by hand. */
+#define MEDTRUM_PRIME_SECONDS 10
+
 /* The delivery model. The commands project it into `status`, and
- * medtrum_patch_tick keeps the clock, the bolus progress, the temp basal and
- * the patch age moving. */
+ * medtrum_patch_tick keeps the clock, the bolus progress, the temp basal, the
+ * priming and the patch age moving. */
 typedef struct {
     uint8_t patch_id[4];      /* the active patch's id */
     uint32_t patch_time;      /* the patch's clock, Medtrum seconds */
@@ -353,6 +367,12 @@ typedef struct {
     uint8_t sn[4];          /* the logical serial, as the app knows it */
     uint8_t device_type;
     uint8_t sw_version[3];
+    /* When priming began, Medtrum seconds. Runtime only, and it has to stay
+     * OUT of medtrum_status_t and medtrum_delivery_t: the simulator persists
+     * those two as a blob and accepts it only when its size still matches, so
+     * a field added there silently discards the board's saved serial and
+     * everything else with it. */
+    uint32_t prime_start;
     uint8_t session_token[4]; /* the last token the app authenticated with */
     bool authenticated;
     bool subscribed;

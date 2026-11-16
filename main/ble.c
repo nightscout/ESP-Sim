@@ -92,6 +92,7 @@ static char cgm_adv_name[16];
 static uint8_t cgm_adv_addr[6];
 static bool medtrum_adv_on;
 static uint8_t medtrum_adv_sn[4];
+static uint8_t medtrum_adv_type = 80;   /* 200 U until medtrum_app.c says otherwise */
 
 static void push(uint8_t type, const uint8_t *data, size_t n)
 {
@@ -420,6 +421,7 @@ static void medtrum_advertise_now(void)
     bool on = medtrum_adv_on;
     uint8_t sn[4];
     memcpy(sn, medtrum_adv_sn, 4);
+    uint8_t type = medtrum_adv_type;
     xSemaphoreGive(adv_mu);
     if (!on) {
         if (ble_gap_ext_adv_active(POD_INSTANCE)) {
@@ -427,7 +429,21 @@ static void medtrum_advertise_now(void)
         }
         return;
     }
-    uint8_t mfg[8] = {0x00, 0x00, sn[0], sn[1], sn[2], sn[3], 1, 1};
+    /* The company id leads the manufacturer data, little-endian on the air:
+     * Medtrum's 0x4781. MedtrumKit ignores these two bytes (iOS keeps the id in
+     * front of the data and it indexes from 2), but Rockit's driver matches the
+     * base on them, so they have to be the real ones.
+     *
+     * Then the serial REVERSED, the device type and the version. A real base
+     * broadcasts the serial the other way round from the way it is printed:
+     * MedtrumKit's `ensureConnectedOnQueue` compares a scan's manufacturer data
+     * (bytes 2..6) against `Data(state.pumpSN.reversed())`, where `pumpSN` is
+     * the serial the person typed in, and its own simulator bypass carries
+     * [0x14,0x16,0xDF,0x52] for the base printed 52DF1614 and
+     * [0x28,0xD8,0x12,0x4A] for 4A12D828 -- both reversed. Broadcast them the
+     * printed way and Trio finds the base, hears it, and ignores it as
+     * "another patch pump", then times out. */
+    uint8_t mfg[8] = {0x81, 0x47, sn[3], sn[2], sn[1], sn[0], type, 1};
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = (const uint8_t *)"MT";
@@ -737,15 +753,16 @@ bool ble_medtrum_connected(void)
     return medtrum_conn != BLE_HS_CONN_HANDLE_NONE;
 }
 
-void ble_medtrum_advertise(void *ctx, bool on, const uint8_t sn[4])
+void ble_medtrum_advertise(void *ctx, bool on, const uint8_t sn[4], uint8_t device_type)
 {
     xSemaphoreTake(adv_mu, portMAX_DELAY);
     medtrum_adv_on = on;
     if (sn) {
         memcpy(medtrum_adv_sn, sn, 4);
+        medtrum_adv_type = device_type;
     }
     xSemaphoreGive(adv_mu);
-    ESP_LOGI(TAG, "Medtrum %s, serial %02X%02X%02X%02X", on ? "advertising" : "not advertising",
-             medtrum_adv_sn[0], medtrum_adv_sn[1], medtrum_adv_sn[2], medtrum_adv_sn[3]);
+    ESP_LOGI(TAG, "Medtrum %s, serial %02X%02X%02X%02X, type %u", on ? "advertising" : "not advertising",
+             medtrum_adv_sn[0], medtrum_adv_sn[1], medtrum_adv_sn[2], medtrum_adv_sn[3], medtrum_adv_type);
     medtrum_advertise_now();
 }

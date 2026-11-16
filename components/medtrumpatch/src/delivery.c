@@ -156,6 +156,7 @@ int medtrum_patch_command(medtrum_patch_t *p, uint8_t command, uint8_t sequence,
         }
         p->status.state = MEDTRUM_STATE_PRIMING;
         p->status.prime_progress = 0;
+        p->prime_start = p->delivery.patch_time;
         p->status.mask |= MEDTRUM_MASK_SETUP;
         payload[0] = p->status.state;
         return medtrum_encode_response(command, sequence, rc, payload, 1, frags, max_frags);
@@ -312,6 +313,14 @@ int medtrum_patch_command(medtrum_patch_t *p, uint8_t command, uint8_t sequence,
     }
 }
 
+/* The reservoir is what has not been delivered yet, in 0.05 U pulses. It
+ * saturates at empty rather than wrapping. */
+static void take_from_reservoir(medtrum_patch_t *p, uint16_t pulses)
+{
+    p->status.reservoir = pulses >= p->status.reservoir ? 0 : (uint16_t)(p->status.reservoir - pulses);
+    p->status.mask |= MEDTRUM_MASK_RESERVOIR;
+}
+
 void medtrum_patch_tick(medtrum_patch_t *p, int64_t now_ms)
 {
     if (p->delivery.last_ms == INT64_MIN) {
@@ -336,7 +345,25 @@ void medtrum_patch_tick(medtrum_patch_t *p, int64_t now_ms)
             p->delivery.bolus_active = false;
             p->status.bolus_completed = true;
         }
+        /* What has gone in comes out of the reservoir, or the app's own
+         * level never moves however much is delivered. */
+        if (delivered > p->status.bolus_delivered) {
+            take_from_reservoir(p, (uint16_t)(delivered - p->status.bolus_delivered));
+        }
         p->status.bolus_delivered = (uint16_t)delivered;
+    }
+
+    /* The patch primes itself: the app sends PRIME and then watches the
+     * status, so without this it never leaves "Priming...". */
+    if (p->status.state == MEDTRUM_STATE_PRIMING) {
+        uint32_t done = p->delivery.patch_time - p->prime_start;
+        p->status.mask |= MEDTRUM_MASK_SETUP;
+        if (done >= MEDTRUM_PRIME_SECONDS) {
+            p->status.prime_progress = 100;
+            p->status.state = MEDTRUM_STATE_PRIMED;
+        } else {
+            p->status.prime_progress = (uint8_t)(done * 100 / MEDTRUM_PRIME_SECONDS);
+        }
     }
 
     /* A temp basal ends on its own. */

@@ -57,7 +57,7 @@ bool ble_medtrum_next_event(void *ctx, medtrum_ev_t *ev, uint32_t timeout_ms);
 void ble_medtrum_notify(void *ctx, const uint8_t *p, size_t n);        /* WRITE: responses */
 void ble_medtrum_notify_status(void *ctx, const uint8_t *p, size_t n); /* READ: notifications */
 void ble_medtrum_disconnect(void *ctx);
-void ble_medtrum_advertise(void *ctx, bool on, const uint8_t sn[4]);
+void ble_medtrum_advertise(void *ctx, bool on, const uint8_t sn[4], uint8_t device_type);
 bool ble_medtrum_connected(void);
 
 /* store.c: NVS. */
@@ -73,3 +73,7 @@ void store_save_medtrum(void *ctx, const medtrum_saved_t *st);
 
 /* panel.c: Wi-Fi (station or access point) and the HTTP control panel. */
 void panel_start(dash_pod_t *pod);
+
+/* captive.c: the DNS hijack and DHCP option that make the access point a
+ * captive portal, so joining it opens the control panel. Called on AP_START. */
+void captive_portal_start(void);

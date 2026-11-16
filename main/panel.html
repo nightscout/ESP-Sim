@@ -14,6 +14,8 @@
   main { max-width:760px; margin:0 auto; padding:16px; display:grid; gap:16px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
   .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 12px; }
+  /* The pod's cards and header bits, hidden in a Medtrum build. */
+  .pod-only[hidden] { display:none; }
   .big { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
   .big .val { font-size:44px; font-weight:600; }
   .big .unit { color:var(--mut); }
@@ -47,11 +49,11 @@
 <body>
 <header>
   <h1 id="title">DASH pod</h1>
-  <span class="meta" id="podid"></span>
-  <span class="chip" id="link" role="status">—</span>
+  <span class="meta pod-only" id="podid"></span>
+  <span class="chip pod-only" id="link" role="status">—</span>
 </header>
 <main>
-  <section class="card" aria-labelledby="h-status">
+  <section class="card pod-only" aria-labelledby="h-status">
     <h2 id="h-status">Pod</h2>
     <div class="big">
       <span class="val" id="reservoir">—</span>
@@ -69,7 +71,7 @@
     </dl>
   </section>
 
-  <section class="card" aria-labelledby="h-res">
+  <section class="card pod-only" aria-labelledby="h-res">
     <h2 id="h-res">Reservoir</h2>
     <div class="row">
       <div><label for="resIn">Units in the reservoir (0–200)</label><input type="number" id="resIn" min="0" max="200" step="0.05"></div>
@@ -78,7 +80,7 @@
     <div class="muted" style="margin-top:8px">The pod reports the level only below 50 U; above that it reports “50+ U”.</div>
   </section>
 
-  <section class="card" aria-labelledby="h-age">
+  <section class="card pod-only" aria-labelledby="h-age">
     <h2 id="h-age">Pod age</h2>
     <div class="row">
       <div><label for="ageIn">Hours since activation</label><input type="number" id="ageIn" min="0" max="100" step="0.25"></div>
@@ -94,13 +96,13 @@
     <div class="muted" style="margin-top:8px">At 80 hours the pod faults with 0x1C at the next command.</div>
   </section>
 
-  <section class="card" aria-labelledby="h-alerts">
+  <section class="card pod-only" aria-labelledby="h-alerts">
     <h2 id="h-alerts">Active alerts</h2>
     <div class="checks" id="alertChecks"></div>
     <div class="actions"><button class="primary" id="alertsSet">Set alerts</button></div>
   </section>
 
-  <section class="card" aria-labelledby="h-fault">
+  <section class="card pod-only" aria-labelledby="h-fault">
     <h2 id="h-fault">Fault</h2>
     <label for="faultIn">Fault code</label>
     <select id="faultIn"></select>
@@ -110,7 +112,7 @@
     </div>
   </section>
 
-  <section class="card" aria-labelledby="h-crash">
+  <section class="card pod-only" aria-labelledby="h-crash">
     <h2 id="h-crash">Unacknowledged command</h2>
     <div class="actions" style="margin-top:0">
       <button class="danger" id="crashBefore">Crash before processing next command</button>
@@ -119,7 +121,7 @@
     <div class="muted" style="margin-top:8px" id="crashNote">The ESP32 reboots at the next command that changes delivery, leaving the phone without a response, then comes back as the same pod. Watch how the app recovers.</div>
   </section>
 
-  <section class="card" aria-labelledby="h-type">
+  <section class="card pod-only" aria-labelledby="h-type">
     <h2 id="h-type">Pod type</h2>
     <label for="typeIn">Simulate</label>
     <select id="typeIn"><option value="0">Omnipod DASH</option><option value="1">Omnipod 5</option></select>
@@ -127,7 +129,7 @@
     <div class="muted" style="margin-top:8px">Switching forgets the current pod. Omnipod 5 pairs with apps whose OmnipodKit supports it, such as Loop 3.14.7 and Trio 1.0 or later.</div>
   </section>
 
-  <section class="card" aria-labelledby="h-newpod">
+  <section class="card pod-only" aria-labelledby="h-newpod">
     <h2 id="h-newpod">New pod</h2>
     <div class="actions" style="margin-top:0"><button class="danger" id="newPod">Forget this pod and start a new one</button></div>
     <div class="muted" style="margin-top:8px">Clears pairing and delivery: the next phone pairs it as a fresh pod. Deactivating the pod from the app does the same.</div>
@@ -423,7 +425,7 @@ function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''
 
 function show(s){
   last = s;
-  if(patchOn !== true) $('title').textContent = (s.podType || 'DASH') + ' pod';
+  if(patchOn !== true){ $('title').textContent = (s.podType || 'DASH') + ' pod'; document.title = 'ESP-Sim ' + $('title').textContent; }
   if(!edited.type) $('typeIn').value = s.podType === 'Omnipod 5' ? '1' : '0';
   $('podid').textContent = s.id ? 'id '+s.id : (s.paired ? '' : 'not paired');
   chip($('link'), s.connected ? 'connected' : 'not connected', s.connected ? 'ok' : '');
@@ -550,11 +552,19 @@ function showPatch(p){
   if(!patchEdited.patchSnIn && document.activeElement!==$('patchSnIn')) $('patchSnIn').value = p.serial;
   if(!patchEdited.patchStateIn) $('patchStateIn').value = String(p.state);
 }
+/* A Medtrum build initialises a pod that never runs or advertises, so its
+ * cards and header bits are noise. /patch answering is how the page knows
+ * which build it is talking to. */
+function setPatchMode(on){
+  document.querySelectorAll('.pod-only').forEach(el=>{ el.hidden = on; });
+  $('patchCard').style.display = on ? '' : 'none';
+  if(on) document.title = 'ESP-Sim Medtrum patch';
+}
 async function refreshPatch(){
   try {
     const r = await fetch('/patch');
-    if(!r.ok){ if(patchOn!==false){ patchOn=false; $('patchCard').style.display='none'; } return; }
-    patchOn = true; $('patchCard').style.display='';
+    if(!r.ok){ if(patchOn!==false){ patchOn=false; setPatchMode(false); } return; }
+    patchOn = true; setPatchMode(true);
     showPatch(await r.json());
   } catch(e){}
 }

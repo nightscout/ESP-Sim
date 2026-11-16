@@ -88,6 +88,16 @@ static const char *model_name(const uint8_t sn[4])
     return "INVALID";
 }
 
+/* The device type the advertisement carries, which is what a scanning app reads
+ * the reservoir from: Rockit's pump list drops any type it does not know, so a
+ * wrong byte hides the base entirely. The serial names the model, so it decides
+ * the type (Rockit's `MedtrumWire.reservoirOfDeviceType`: 98 is 300 U, 80 is a
+ * 200 U patch). */
+static uint8_t device_type_of(const uint8_t sn[4])
+{
+    return strcmp(model_name(sn), "MD8301") == 0 ? 98 : 80;
+}
+
 static bool serial_hex(const char *s, uint8_t sn[4])
 {
     if (strlen(s) != 8) {
@@ -223,12 +233,13 @@ void medtrum_app_start(void)
         memcpy(sn, st.sn, 4);
     }
     medtrum_patch_init(&patch, sn);
-    patch.device_type = 80;
+    /* Derived, not restored: the serial is what was saved and it decides the
+     * model, so a stored type from an older serial would only contradict it. */
+    patch.device_type = device_type_of(patch.sn);
     patch.sw_version[0] = 12;
     patch.sw_version[1] = 1;
     patch.sw_version[2] = 3;
     if (have) {
-        patch.device_type = st.device_type;
         memcpy(patch.sw_version, st.sw_version, 3);
         patch.status = st.status;
         patch.delivery = st.delivery;
@@ -246,7 +257,7 @@ void medtrum_app_start(void)
     }
     ESP_LOGW(TAG, "simulating a Medtrum %s, serial %02X%02X%02X%02X. TEST EQUIPMENT: delivers nothing.",
              model_name(patch.sn), patch.sn[0], patch.sn[1], patch.sn[2], patch.sn[3]);
-    io.advertise(io.ctx, true, patch.sn);
+    io.advertise(io.ctx, true, patch.sn, patch.device_type);
     xTaskCreatePinnedToCore(medtrum_task, "medtrum", 12288, NULL, 5, NULL, tskNO_AFFINITY);
 }
 
@@ -351,9 +362,10 @@ const char *medtrum_app_command(const char *body)
         }
         LOCKED({
             memcpy(patch.sn, sn, 4);
+            patch.device_type = device_type_of(patch.sn);
             patch.authenticated = false;
             save_state();
-            io.advertise(io.ctx, true, patch.sn);
+            io.advertise(io.ctx, true, patch.sn, patch.device_type);
         });
     } else if (strcmp(cmd, "medtrumSetModel") == 0) {
         if (!json_number(body, "units", &v) || (v != 200 && v != 300)) {
@@ -368,9 +380,10 @@ const char *medtrum_app_command(const char *body)
         }
         LOCKED({
             memcpy(patch.sn, sn, 4);
+            patch.device_type = device_type_of(patch.sn);
             patch.authenticated = false;
             save_state();
-            io.advertise(io.ctx, true, patch.sn);
+            io.advertise(io.ctx, true, patch.sn, patch.device_type);
         });
     } else if (strcmp(cmd, "medtrumSetReservoir") == 0) {
         double units;
@@ -403,7 +416,7 @@ const char *medtrum_app_command(const char *body)
             uint8_t sn[4];
             memcpy(sn, patch.sn, 4);
             medtrum_patch_init(&patch, sn);
-            patch.device_type = 80;
+            patch.device_type = device_type_of(patch.sn);
             patch.sw_version[0] = 12;
             patch.sw_version[1] = 1;
             patch.sw_version[2] = 3;

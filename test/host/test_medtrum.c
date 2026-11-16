@@ -954,6 +954,103 @@ static void test_request_parser(void)
     CHECK(!medtrum_request_feed(&r, wrong_seq, sizeof wrong_seq));
 }
 
+/* The patch primes itself. MedtrumKit sends PRIME and returns as soon as the
+ * write succeeds, then waits for the patch's own status to reach PRIMED -- it
+ * has no timeout of its own -- so the progress and the change have to come
+ * from the tick. */
+static void test_priming_completes(void)
+{
+    medtrum_patch_t p;
+    uint8_t sn[4] = {0x52, 0xDF, 0x16, 0x14};
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+
+    medtrum_patch_init(&p, sn);
+    medtrum_patch_set_state(&p, MEDTRUM_STATE_FILLED);
+
+    int n = medtrum_patch_handle(&p, MEDTRUM_CMD_PRIME, 0, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMING);
+    CHECK(p.status.prime_progress == 0);
+    CHECK(p.status.mask & MEDTRUM_MASK_SETUP);
+
+    /* The first tick only records the clock. */
+    medtrum_patch_tick(&p, 1000000);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMING);
+
+    /* Half way: the progress has moved, the state has not. */
+    medtrum_patch_tick(&p, 1000000 + (MEDTRUM_PRIME_SECONDS / 2) * 1000);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMING);
+    CHECK(p.status.prime_progress > 0 && p.status.prime_progress < 100);
+    CHECK(p.status.prime_progress == (MEDTRUM_PRIME_SECONDS / 2) * 100 / MEDTRUM_PRIME_SECONDS);
+
+    /* The end: PRIMED, at 100%. */
+    medtrum_patch_tick(&p, 1000000 + (MEDTRUM_PRIME_SECONDS + 1) * 1000);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMED);
+    CHECK(p.status.prime_progress == 100);
+
+    /* And it stays primed: a second PRIME is refused as a bad state. */
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_PRIME, 1, NULL, 0, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMED);
+
+    /* The panel's Set state enters PRIMING too, and has to start its own
+     * clock: otherwise prime_start is 0 and the next tick finishes it at
+     * once, which fights whoever just set it. */
+    uint32_t now = 1000000 + (MEDTRUM_PRIME_SECONDS + 1) * 1000;
+    medtrum_patch_set_state(&p, MEDTRUM_STATE_PRIMING);
+    medtrum_patch_tick(&p, now + 1000);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMING);
+    /* Its own clock, so a second in it has not finished it. (Assert the
+     * intent, not a percentage: the step depends on MEDTRUM_PRIME_SECONDS.) */
+    CHECK(p.status.prime_progress < 100);
+
+    medtrum_patch_tick(&p, now + (MEDTRUM_PRIME_SECONDS + 1) * 1000);
+    CHECK(p.status.state == MEDTRUM_STATE_PRIMED);
+    CHECK(p.status.prime_progress == 100);
+}
+
+/* A bolus comes out of the reservoir, so the level the app shows falls as
+ * insulin goes in. It used to be set once and never move. */
+static void test_bolus_drains_the_reservoir(void)
+{
+    medtrum_patch_t p;
+    uint8_t sn[4] = {0x52, 0xDF, 0x16, 0x14};
+    medtrum_frag_t resp[MEDTRUM_FRAGS_MAX];
+
+    medtrum_patch_init(&p, sn);
+    medtrum_patch_set_state(&p, MEDTRUM_STATE_ACTIVE);
+    medtrum_patch_set_reservoir(&p, 1000); /* 50.00 U */
+
+    /* SET_BOLUS: 1.40 U = 28 pulses of 0.05 U. */
+    uint8_t bolus[] = {1, 0x1C, 0x00, 0};
+    int n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_BOLUS, 0, bolus, sizeof bolus, resp,
+                                 MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    CHECK(p.delivery.bolus_total == 28);
+    CHECK(p.status.reservoir == 1000); /* nothing delivered yet */
+
+    /* The clock, then +20 s: 10 of the 28 pulses. */
+    medtrum_patch_tick(&p, 1000000);
+    medtrum_patch_tick(&p, 1020000);
+    CHECK(p.status.bolus_delivered == 10);
+    CHECK(p.status.reservoir == 990);
+
+    /* +40 s: the bolus completes, and the rest is out too. */
+    medtrum_patch_tick(&p, 1060000);
+    CHECK(p.status.bolus_delivered == 28);
+    CHECK(p.status.bolus_completed);
+    CHECK(p.status.reservoir == 972);
+
+    /* A bolus larger than what is left empties it and stops at zero. */
+    medtrum_patch_set_reservoir(&p, 5);
+    n = medtrum_patch_handle(&p, MEDTRUM_CMD_SET_BOLUS, 1, bolus, sizeof bolus, resp, MEDTRUM_FRAGS_MAX);
+    CHECK(n == 1);
+    medtrum_patch_tick(&p, 1080000);
+    medtrum_patch_tick(&p, 1200000);
+    CHECK(p.status.bolus_completed);
+    CHECK(p.status.reservoir == 0);
+}
+
 int main(void)
 {
     test_crc8();
@@ -972,6 +1069,8 @@ int main(void)
     test_session();
     test_session_failures();
     test_lifecycle();
+    test_priming_completes();
+    test_bolus_drains_the_reservoir();
     test_fault_mapping();
     test_request_parser();
 

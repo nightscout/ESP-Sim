@@ -57,6 +57,9 @@ static void start_ap(void)
     ap.ap.channel = 1;
     ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    /* Broadcast the name: the panel is only useful if you can find it, and a
+     * hidden access point is one a phone cannot be captured by either. */
+    ap.ap.ssid_hidden = 0;
     wifi_mode_t mode;
     esp_wifi_get_mode(&mode);
     esp_wifi_set_mode(mode == WIFI_MODE_STA ? WIFI_MODE_APSTA : WIFI_MODE_AP);
@@ -68,10 +71,13 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
+        captive_portal_start();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        /* The access point runs either way, so a station that will not join is
+         * only worth a note. */
         if (++sta_failures == 5) {
-            ESP_LOGW(TAG, "could not join the saved network: starting the access point too");
-            start_ap();
+            ESP_LOGW(TAG, "could not join the saved network; the access point is up regardless");
         }
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -105,9 +111,11 @@ static void wifi_start(void)
         esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_set_config(WIFI_IF_STA, &sta);
         ESP_LOGI(TAG, "joining \"%s\"", ssid);
-    } else {
-        start_ap();
     }
+    /* The access point runs either way, so the panel is always reachable and
+     * always there to be captured. start_ap() promotes the mode to APSTA when
+     * a station is configured. */
+    start_ap();
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -128,7 +136,20 @@ static esp_err_t send_status(httpd_req_t *req)
 static esp_err_t get_index(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, panel_html_start, panel_html_end - panel_html_start);
+}
+
+/* Anything the panel does not serve is a phone's captive portal probe: it
+ * asked for its connectivity check and belongs at the panel instead. iOS
+ * wants a body, not just the redirect, before it calls it a portal. */
+static esp_err_t redirect_to_panel(httpd_req_t *req, httpd_err_code_t err)
+{
+    (void)err;
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, "Redirect to the ESP-Sim control panel", HTTPD_RESP_USE_STRLEN);
 }
 
 static int read_body(httpd_req_t *req, char *buf, size_t size)
@@ -319,4 +340,5 @@ void panel_start(dash_pod_t *pod)
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; i++) {
         httpd_register_uri_handler(server, &routes[i]);
     }
+    httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, redirect_to_panel);
 }

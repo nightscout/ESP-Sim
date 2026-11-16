@@ -21,6 +21,13 @@ void medtrum_patch_init(medtrum_patch_t *p, const uint8_t sn[4])
 
 void medtrum_patch_set_state(medtrum_patch_t *p, uint8_t state)
 {
+    /* Entering PRIMING any way -- the panel's Set state as well as the PRIME
+     * command -- starts its clock here. Without this a manual priming would
+     * carry prime_start 0 and the next tick would complete it at once. */
+    if (state == MEDTRUM_STATE_PRIMING && p->status.state != MEDTRUM_STATE_PRIMING) {
+        p->prime_start = p->delivery.patch_time;
+        p->status.prime_progress = 0;
+    }
     p->status.state = state;
 }
 
