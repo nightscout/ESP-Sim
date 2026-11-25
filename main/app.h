@@ -60,6 +60,8 @@ uint8_t store_load_pump(void);
 void store_save_pump(uint8_t pump);
 bool store_load_ypso(ypso_state_t *st);
 bool store_load_ypso_open(void);
+size_t store_load_ypso_peers(uint8_t *out, size_t cap);
+void store_save_ypso_peers(const uint8_t *p, size_t n);
 void store_save_ypso_open(bool open);
 void store_save_ypso(void *ctx, const ypso_state_t *st);
 void store_save_cgm(void *ctx, const cgm_state_t *st);

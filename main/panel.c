@@ -274,11 +274,11 @@ static esp_err_t post_ypso(httpd_req_t *req)
         restart_soon();
         return ESP_OK;
     }
-    char *reply = malloc(2400);
+    char *reply = malloc(4200);
     if (!reply) {
         return httpd_resp_send_500(req);
     }
-    const char *err = store_load_pump() == 1 ? ypso_app_command(body, reply, 2400) : "the board is not a YpsoPump";
+    const char *err = store_load_pump() == 1 ? ypso_app_command(body, reply, 4200) : "the board is not a YpsoPump";
     esp_err_t r;
     if (err) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
@@ -290,7 +290,7 @@ static esp_err_t post_ypso(httpd_req_t *req)
     } else {
         r = send_ypso(req);
     }
-    memset(reply, 0, 2400);
+    memset(reply, 0, 4200);
     free(reply);
     return r;
 }
@@ -364,7 +364,7 @@ void panel_start(dash_pod_t *pod)
     wifi_start();
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.stack_size = 12288; /* the YpsoPump's key export: PBKDF2 and AES-GCM */
+    cfg.stack_size = 12288; /* room for the larger handlers */
     cfg.max_uri_handlers = 12;
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &cfg));

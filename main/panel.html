@@ -169,12 +169,8 @@
       <button id="ypReboot">Restart the pump (reboot counter +1)</button>
       <button id="ypBonds">Forget Bluetooth bonds</button>
     </div>
-    <label style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 0;font-size:14px;color:var(--fg)"><input type="checkbox" id="ypOpen" style="margin-top:3px"> <span>Let any phone in without the pump's password, so an app with no key file for it works at once (a real pump never does this). Untick to need the password from the key export, like a real pump.</span></label>
-    <div class="actions">
-      <button class="primary" id="ypExport">Download the key export for rockit</button>
-      <span class="muted" id="ypPass"></span>
-    </div>
-    <div class="muted" style="margin-top:8px">The export carries this simulated pump's own session key and password (made at random, no real pump's), sealed under the passphrase shown. Import it with rockit's <code>pump-provision export</code> or the phone app. The pump pairs over Bluetooth by passkey the first time the phone connects: type the number shown at the top of this card. The key export is needed only when the box above is unticked, or for the encrypted firmware (V05, V35), whose messages need the session key.</div>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 0;font-size:14px;color:var(--fg)"><input type="checkbox" id="ypOpen" style="margin-top:3px"> <span>Let any phone in without the pump's sign-in password, so an app that has none for it works at once (a real pump never does this). Untick to refuse a phone without the pump's own password, like a real pump.</span></label>
+    <div class="muted" style="margin-top:8px">The encrypted firmware (V05, V35) talks only under a session key that the phone and pump agree in the pump's key exchange, and the pump runs that exchange only for a server key it trusts. This simulated pump trusts its own, made at random on this board (no real pump's key); the panel does not hand it out, so a phone cannot run the key exchange with it yet. The clear-text firmware (V65, V03, V02) needs none of this. The pump pairs over Bluetooth by passkey: type the number shown at the top of this card.</div>
   </section>
 
   <section class="card" aria-labelledby="h-newpod">
@@ -503,13 +499,6 @@ $('ypReboot').onclick = async ()=>{ if(confirm('Restart the pump? Its reboot cou
 $('ypOpen').onchange = async ()=>{ const on = $('ypOpen').checked;
   const j = await ypSend({command:'ypsoOpen', on:on}, on ? 'Any phone gets in' : 'Only the pump\'s password gets in'); if(j) showYpso(j); };
 $('ypBonds').onclick = ()=>{ if(confirm('Forget every Bluetooth bond? The phone must pair again (and may need to forget the pump too).')) ypSend({command:'ypsoForgetBonds'}, 'Bonds forgotten'); };
-$('ypExport').onclick = async ()=>{ say('Making the export (a few seconds)…');
-  const j = await ypSend({command:'ypsoExport'}, 'Export ready');
-  if(!j || !j.file) return;
-  const blob = new Blob([JSON.stringify(j.file, null, 2)], {type:'application/json'});
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = 'ypso-session-'+j.file.pump_serial+'.json'; document.body.appendChild(a); a.click(); a.remove();
-  $('ypPass').textContent = 'Passphrase: '+j.passphrase; };
 function showYpso(y){
   ypActive = !!y.active;
   $('ypsoCard').hidden = !ypActive;

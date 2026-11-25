@@ -104,6 +104,19 @@ void store_save_pump(uint8_t pump)
     nvs_commit(nvs);
 }
 
+/* The YpsoPump's bonded devices, oldest first (7 bytes each: type, address). */
+size_t store_load_ypso_peers(uint8_t *out, size_t cap)
+{
+    size_t len = cap;
+    return nvs_get_blob(nvs, "ypsoPeers", out, &len) == ESP_OK ? len : 0;
+}
+
+void store_save_ypso_peers(const uint8_t *p, size_t n)
+{
+    nvs_set_blob(nvs, "ypsoPeers", p, n);
+    nvs_commit(nvs);
+}
+
 /* The YpsoPump lets phones in without its password unless told not to. */
 bool store_load_ypso_open(void)
 {
@@ -120,9 +133,12 @@ void store_save_ypso_open(bool open)
 
 bool store_load_ypso(ypso_state_t *st)
 {
+    /* A state saved before the key exchange was simulated is shorter: the
+     * fields after it start at zero (ypso_init fills them in). */
+    memset(st, 0, sizeof *st);
     size_t len = sizeof *st;
-    return nvs_get_blob(nvs, "ypso", st, &len) == ESP_OK && len == sizeof *st && st->version == YPSO_STATE_VERSION &&
-           st->fw < YPSO_FW_COUNT;
+    return nvs_get_blob(nvs, "ypso", st, &len) == ESP_OK && len >= offsetof(ypso_state_t, server_priv) &&
+           len <= sizeof *st && st->version == YPSO_STATE_VERSION && st->fw < YPSO_FW_COUNT;
 }
 
 void store_save_ypso(void *ctx, const ypso_state_t *st)

@@ -11,9 +11,18 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "dash.h" /* crypto: ChaCha20-Poly1305, random, PBKDF2, AES-GCM, base64 */
+#include "dash.h" /* crypto: ChaCha20-Poly1305, random, SHA-256 */
+#include "dash_internal.h" /* X25519 */
+
+/* Temp basal limits (settings 116-119): 500 % for up to 24 h, any percentage,
+ * as the owner's pump accepts. */
+#define TBR_LONG_MAX 500
+#define TBR_LONG_MINUTES 1440
+#define TBR_SHORT_MAX 500
+#define TBR_SHORT_MINUTES 1440
 
 /* ---- firmware --------------------------------------------------------------------- */
 
@@ -282,6 +291,101 @@ int ypso_open(const uint8_t key[32], const uint8_t *in, size_t n, uint8_t *out, 
     return (int)len;
 }
 
+/* ---- the key exchange (encrypted firmware) ---------------------------------------------- */
+/*
+ * What mylife, CamAPS and rockit's offline pairing run on an encrypted pump
+ * (rockit's decision record ypso-offline-pair §1, key_exchange.rs):
+ *
+ *   1. the app reads NewPublicKey (framed, continued over ExtendedRead):
+ *      a fresh 32-byte challenge, then the pump's X25519 public key;
+ *   2. the app writes a blob to WriteChallengeUtcAppPubKey (clear, framed):
+ *      XChaCha20-Poly1305(K_s)(challenge ‖ ttl u32 ‖ public key ‖ counter u64)
+ *      ‖ nonce, with K_s = HChaCha20(X25519(pump private, server public), 0¹⁶);
+ *   3. the pump's new session key is HChaCha20(X25519(pump private, the
+ *      blob's public key), 0¹⁶), and it counts its messages from the bottom.
+ *
+ * A stock pump trusts the vendor's server key. This one trusts its own
+ * (server_priv), made at random on the board. A blob that does not open is
+ * refused 0x8A; a counter not above the last exchange's, 0x8B.
+ */
+
+static void save(ypso_t *y);
+
+static void pump_private(const ypso_state_t *st, uint8_t out[32])
+{
+    /* Stable for this pump without a new saved field: from its own secrets. */
+    uint8_t in[16 + 16 + 4];
+    memcpy(in, "esp-sim ypso x25", 16);
+    memcpy(in + 16, st->password, 16);
+    put32(in + 32, st->serial);
+    dash_sha256(in, sizeof in, out);
+    memset(in, 0, sizeof in);
+}
+
+static void x25519_hchacha(const uint8_t priv[32], const uint8_t pub[32], uint8_t out[32])
+{
+    static const uint8_t zero[16];
+    uint8_t shared[32];
+    dash_x25519(shared, priv, pub);
+    hchacha20(shared, zero, out);
+    memset(shared, 0, sizeof shared);
+}
+
+void ypso_pump_public(const ypso_state_t *st, uint8_t out[32])
+{
+    uint8_t priv[32];
+    pump_private(st, priv);
+    dash_x25519_base(out, priv);
+    memset(priv, 0, sizeof priv);
+}
+
+#define KX_PT 76    /* challenge 32, ttl 4, public key 32, counter 8 */
+#define KX_BLOB 116 /* + tag 16 + nonce 24 */
+
+/* The reassembled blob. 0, or the pump's refusal. */
+static int key_exchange(ypso_t *y, const uint8_t *blob, size_t n)
+{
+    if (n != KX_BLOB || !y->challenge_set) {
+        ylog(y, "key exchange refused: %s", n != KX_BLOB ? "the blob's length is wrong" : "no offer was read");
+        return YPSO_ENCRYPTION_FAILED;
+    }
+    uint8_t priv[32], server_pub[32], ks[32], sub[32], n12[12], pt[KX_PT];
+    pump_private(&y->st, priv);
+    dash_x25519_base(server_pub, y->st.server_priv);
+    x25519_hchacha(priv, server_pub, ks);
+    xnonce(ks, blob + KX_PT + 16, sub, n12);
+    int rc = dash_chachapoly_open(sub, n12, blob, KX_PT, pt);
+    memset(ks, 0, sizeof ks);
+    memset(sub, 0, sizeof sub);
+    if (rc != 0 || memcmp(pt, y->challenge, 32) != 0) {
+        memset(priv, 0, sizeof priv);
+        memset(pt, 0, sizeof pt);
+        ylog(y, "key exchange refused: %s", rc != 0 ? "the blob does not open under the trusted server key"
+                                                     : "the blob is for another challenge");
+        return YPSO_ENCRYPTION_FAILED;
+    }
+    uint32_t ttl = get32(pt + 32);
+    uint64_t counter = get32(pt + 68) | (uint64_t)get32(pt + 72) << 32;
+    if (counter <= y->st.kx_counter) {
+        memset(priv, 0, sizeof priv);
+        memset(pt, 0, sizeof pt);
+        ylog(y, "key exchange refused: counter %llu not above %llu", (unsigned long long)counter,
+             (unsigned long long)y->st.kx_counter);
+        return YPSO_COUNTER_ERROR;
+    }
+    x25519_hchacha(priv, pt + 36, y->st.key);
+    memset(priv, 0, sizeof priv);
+    memset(pt, 0, sizeof pt);
+    y->st.kx_counter = counter;
+    y->st.read_counter = 0;
+    y->st.write_counter = 0;
+    y->challenge_set = false;
+    memset(y->challenge, 0, sizeof y->challenge);
+    ylog(y, "key exchange done: a new session key, valid %u days", (unsigned)(ttl / 86400));
+    save(y);
+    return YPSO_OK;
+}
+
 /* ---- the pump's clock -------------------------------------------------------------------- */
 
 static int64_t days_from_civil(int y, int m, int d)
@@ -393,6 +497,7 @@ void ypso_state_fresh(ypso_state_t *st, ypso_fw_t fw)
         st->basal_b[h] = 50;
     }
     st->tbr_percent = 100;
+    dash_random(st->server_priv, sizeof st->server_priv);
 }
 
 void ypso_init(ypso_t *y, const ypso_state_t *st, const ypso_io_t *io)
@@ -401,6 +506,12 @@ void ypso_init(ypso_t *y, const ypso_state_t *st, const ypso_io_t *io)
     y->st = *st;
     y->io = io;
     y->last_tick = io->now(io->ctx);
+    static const uint8_t none[32];
+    if (memcmp(y->st.server_priv, none, 32) == 0) {
+        /* Saved before the key exchange was simulated. */
+        dash_random(y->st.server_priv, sizeof y->st.server_priv);
+        y->dirty = true;
+    }
 }
 
 static void save(ypso_t *y)
@@ -630,10 +741,10 @@ static bool setting_get(ypso_t *y, int32_t id, int32_t *v)
         case 113: *v = 1000; break;       /* basal cap 10 U/h */
         case 114: *v = 2; break;          /* basal min 0.02 U/h */
         case 115: *v = 4000; break;       /* basal max 40 U/h */
-        case 116: *v = 200; break;        /* TBR long scale max % */
-        case 117: *v = 1440; break;       /* TBR long duration max, minutes */
-        case 118: *v = 250; break;        /* TBR short scale max % */
-        case 119: *v = 240; break;        /* TBR short duration max */
+        case 116: *v = TBR_LONG_MAX; break;     /* TBR long scale max % */
+        case 117: *v = TBR_LONG_MINUTES; break; /* TBR long duration max, minutes */
+        case 118: *v = TBR_SHORT_MAX; break;    /* TBR short scale max % */
+        case 119: *v = TBR_SHORT_MINUTES; break; /* TBR short duration max */
         case 120: *v = 1; break;          /* TBR end not indicated */
         default: return false;
         }
@@ -780,6 +891,8 @@ static int start_bolus(ypso_t *y, int32_t total, int32_t minutes, int32_t now_pa
 
 static int set_tbr(ypso_t *y, int32_t percent, int32_t minutes)
 {
+    /* What settings 116-119 report, enforced: up to the long ceiling for up to
+     * its duration, above it up to the short ceiling for up to its own. */
     ypso_state_t *st = &y->st;
     const ypso_fw_info_t *f = ypso_fw(st->fw);
     if (percent == 100) { /* the cancel: 100 % / 0 */
@@ -794,7 +907,9 @@ static int set_tbr(ypso_t *y, int32_t percent, int32_t minutes)
     if (st->tbr_percent != 100) {
         return YPSO_INTERNAL_ERROR; /* §3.6: a TBR already running; the driver clears it first */
     }
-    if (percent < 0 || percent > 250 || percent % f->tbr_step || minutes < 15 || minutes > 1440 || minutes % 15) {
+    int32_t longest = percent <= TBR_LONG_MAX ? TBR_LONG_MINUTES : TBR_SHORT_MINUTES;
+    if (percent < 0 || percent > (TBR_LONG_MAX > TBR_SHORT_MAX ? TBR_LONG_MAX : TBR_SHORT_MAX) ||
+        percent % f->tbr_step || minutes < 15 || minutes > longest || minutes % 15) {
         return YPSO_VALUE_INVALID;
     }
     st->tbr_percent = percent;
@@ -1008,8 +1123,31 @@ int ypso_on_read(ypso_t *y, ypso_chr_t c, uint8_t *out, size_t cap, size_t *len)
         *len = k + 1;
         return YPSO_OK;
     }
+    if (c == YC_NEW_PUBLIC_KEY) {
+        /* The key exchange's offer: a fresh challenge and the pump's public
+         * key, in clear, framed; frame 1 here, the rest through ExtendedRead. */
+        if (!y->authorized && !y->open) {
+            return YPSO_ATT_INSUFFICIENT_AUTHORIZATION;
+        }
+        if (cap < YPSO_PKT) {
+            return YPSO_VALUE_INVALID;
+        }
+        dash_random(y->challenge, sizeof y->challenge);
+        y->challenge_set = true;
+        memcpy(y->tx, y->challenge, 32);
+        ypso_pump_public(&y->st, y->tx + 32);
+        y->tx_len = 64;
+        y->tx_frames = (uint8_t)((y->tx_len + 18) / 19);
+        y->tx_frame = 0;
+        out[0] = (uint8_t)((++y->tx_frame << 4 & 0xf0) | (y->tx_frames & 0x0f));
+        memcpy(out + 1, y->tx, 19);
+        y->tx_off = 19;
+        *len = 20;
+        ylog(y, "key exchange: offer read");
+        return YPSO_OK;
+    }
     const char *ver = version_string(y, c);
-    if (ver || c == YC_PAIRING_PASSKEY || c == YC_NEW_PUBLIC_KEY) {
+    if (ver || c == YC_PAIRING_PASSKEY) {
         /* Clear text, unframed: e.g. "V05.02.03\0". */
         size_t k = ver ? strlen(ver) : 0;
         if (k + 1 > cap) {
@@ -1072,9 +1210,6 @@ int ypso_on_write(ypso_t *y, ypso_chr_t c, const uint8_t *p, size_t n)
         ylog(y, "authorisation password %s", right ? "accepted" : y->open ? "not this pump's, let in (open)" : "wrong");
         return YPSO_OK;
     }
-    if (c == YC_WRITE_CHALLENGE) {
-        return YPSO_OK; /* named, never used by the driver */
-    }
     if (!y->authorized && !y->open) {
         return YPSO_ATT_INSUFFICIENT_AUTHORIZATION;
     }
@@ -1085,7 +1220,8 @@ int ypso_on_write(ypso_t *y, ypso_chr_t c, const uint8_t *p, size_t n)
         }
         return rc;
     }
-    /* §3.1: reassemble the frames; each is one GATT write. */
+    /* §3.1: reassemble the frames; each is one GATT write. The key
+     * exchange's blob is framed the same way, but in clear. */
     if (n < 1 || n > YPSO_PKT) {
         return YPSO_VALUE_INVALID;
     }
@@ -1108,6 +1244,12 @@ int ypso_on_write(ypso_t *y, ypso_chr_t c, const uint8_t *p, size_t n)
     y->rx_next++;
     if (this_frame < frames) {
         return YPSO_OK;
+    }
+    if (c == YC_WRITE_CHALLENGE) {
+        int rc = key_exchange(y, y->rx, y->rx_len);
+        y->rx_len = 0;
+        y->rx_next = 1;
+        return rc;
     }
     /* Whole: open, check the counters (§7, forward-tolerant), run. */
     uint8_t pt[YPSO_MSG_MAX];
@@ -1207,80 +1349,4 @@ size_t ypso_status_json(ypso_t *y, char *out, size_t cap)
                      (unsigned)st->reboot, (unsigned long long)st->read_counter,
                      (unsigned long long)st->write_counter, st->n_events, (long long)pump_now(y));
     return n > 0 && (size_t)n < cap ? (size_t)n : 0;
-}
-
-/* ---- the key export (rockit docs/KEY-EXPORT.md) -------------------------------------------- */
-
-static void iso(int64_t t, char out[24])
-{
-    int64_t day = t >= 0 ? t / 86400 : (t - 86399) / 86400;
-    int64_t s = t - day * 86400;
-    int yr, mo, dd;
-    civil_from_days(day, &yr, &mo, &dd);
-    snprintf(out, 24, "%04d-%02d-%02dT%02d:%02d:%02dZ", yr, mo, dd, (int)(s / 3600), (int)(s / 60 % 60),
-             (int)(s % 60));
-}
-
-static void hex(const uint8_t *p, size_t n, char *out)
-{
-    static const char H[] = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[2 * i] = H[p[i] >> 4];
-        out[2 * i + 1] = H[p[i] & 15];
-    }
-    out[2 * n] = 0;
-}
-
-int ypso_key_export(const ypso_state_t *st, const uint8_t mac[6], const char *passphrase, uint32_t iterations,
-                    int64_t now, char *out, size_t cap)
-{
-    char key_hex[65], pw_hex[33], name[24], captured[24], until[24];
-    hex(st->key, 32, key_hex);
-    hex(st->password, 16, pw_hex);
-    ypso_name(st, name);
-    iso(now, captured);
-    iso(now + 28 * 86400, until);
-    /* The session (protocol.md) beside the credential tables, which carry this
-     * pump's password by its advertised name: the driver needs no rotation key. */
-    char body[700];
-    int bn = snprintf(body, sizeof body,
-                      "{\"session\":{\"version\":1,\"pump_mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-                      "\"pump_serial\":\"%08u\",\"shared_key\":\"%s\",\"write_counter\":-1,\"read_counter\":-1,"
-                      "\"reboot_counter\":%u,\"captured_at\":\"%s\",\"key_valid_until\":\"%s\","
-                      "\"key_valid_until_source\":\"assumed\",\"source\":\"esp-sim\"},"
-                      "\"credential_tables\":{\"version\":1,\"rotation\":[],"
-                      "\"pumps\":[{\"name\":\"%s\",\"code\":\"P1\",\"password\":\"%s\"}]}}",
-                      mac[5], mac[4], mac[3], mac[2], mac[1], mac[0], (unsigned)st->serial, key_hex,
-                      (unsigned)st->reboot, captured, until, name, pw_hex);
-    memset(key_hex, 0, sizeof key_hex);
-    memset(pw_hex, 0, sizeof pw_hex);
-    if (bn < 0 || (size_t)bn >= sizeof body) {
-        return -1;
-    }
-    uint8_t salt[16], nonce[12], k[32];
-    dash_random(salt, sizeof salt);
-    dash_random(nonce, sizeof nonce);
-    if (dash_pbkdf2_sha256((const uint8_t *)passphrase, strlen(passphrase), salt, sizeof salt, iterations, k) != 0) {
-        return -1;
-    }
-    uint8_t ct[sizeof body + 16];
-    int rc = dash_aes256_gcm_seal(k, nonce, (const uint8_t *)body, (size_t)bn, ct);
-    memset(k, 0, sizeof k);
-    memset(body, 0, sizeof body);
-    if (rc != 0) {
-        return -1;
-    }
-    char salt64[32], nonce64[24], ct64[1000];
-    if (dash_base64(salt, sizeof salt, salt64, sizeof salt64) < 0 ||
-        dash_base64(nonce, sizeof nonce, nonce64, sizeof nonce64) < 0 ||
-        dash_base64(ct, (size_t)bn + 16, ct64, sizeof ct64) < 0) {
-        return -1;
-    }
-    int n = snprintf(out, cap,
-                     "{\"format\":\"ypso-session-export\",\"version\":1,"
-                     "\"kdf\":{\"name\":\"pbkdf2-hmac-sha256\",\"iterations\":%u,\"salt\":\"%s\"},"
-                     "\"cipher\":\"aes-256-gcm\",\"nonce\":\"%s\",\"ciphertext\":\"%s\","
-                     "\"pump_serial\":\"%08u\",\"exported_at\":\"%s\"}",
-                     (unsigned)iterations, salt64, nonce64, ct64, (unsigned)st->serial, captured);
-    return n > 0 && (size_t)n < cap ? n : -1;
 }

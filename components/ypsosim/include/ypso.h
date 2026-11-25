@@ -189,6 +189,10 @@ typedef struct {
     uint32_t delivered_total;  /* hundredths of a unit, ever: what a body would have received */
     uint16_t n_events;
     ypso_event_t events[YPSO_EVENTS]; /* oldest first */
+    /* The key exchange (encrypted firmware). Added later: a state saved before
+     * has these zero, and ypso_init fills them in. */
+    uint8_t server_priv[32];   /* the server key this pump trusts, made at random on the board */
+    uint64_t kx_counter;       /* the last key exchange's counter: the next must be greater */
 } ypso_state_t;
 
 typedef struct {
@@ -218,6 +222,9 @@ typedef struct {
     uint8_t tx[YPSO_MSG_MAX + 16];
     size_t tx_len, tx_off;
     uint8_t tx_frame, tx_frames;
+    /* The key exchange: the challenge in the last NewPublicKey read. */
+    uint8_t challenge[32];
+    bool challenge_set;
     int64_t last_tick, last_save;
     bool dirty;
 } ypso_t;
@@ -241,17 +248,14 @@ void ypso_set_battery(ypso_t *y, uint8_t level);
 void ypso_set_suspended(ypso_t *y, bool on);
 /* Open: the pump lets the phone in without its password, or with any
  * password, so an app with no credentials for it works at once. Closed: like
- * a real pump, only its own password (from the key export). */
+ * a real pump, only its own password. */
 void ypso_set_open(ypso_t *y, bool open);
 void ypso_reboot(ypso_t *y);   /* the pump restarts: its reboot counter goes up */
 size_t ypso_status_json(ypso_t *y, char *out, size_t cap);
 /* The advertised name: "YpsoPump_<serial>". */
 void ypso_name(const ypso_state_t *st, char out[24]);
-/* A rockit key-export file (ypso-session-export, docs/KEY-EXPORT.md) for this
- * pump: its session and its password, sealed under passphrase. Returns the
- * length, or -1. Slow: PBKDF2 at `iterations`. */
-int ypso_key_export(const ypso_state_t *st, const uint8_t mac[6], const char *passphrase, uint32_t iterations,
-                    int64_t now, char *out, size_t cap);
+/* The pump's X25519 public key (the second half of its NewPublicKey offer). */
+void ypso_pump_public(const ypso_state_t *st, uint8_t out[32]);
 
 /* ---- exposed for tests -------------------------------------------------------- */
 

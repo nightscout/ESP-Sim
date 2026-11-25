@@ -1,9 +1,9 @@
 /*
  * The simulated YpsoPump on the board: wires the portable engine (ypsosim)
  * to the radio, the clock and flash, ticks it once a second, takes the
- * control panel's commands and makes its key-export file.
+ * control panel's commands.
  *
- * TEST EQUIPMENT ONLY: it delivers nothing. Its key and password are its own,
+ * TEST EQUIPMENT ONLY: it delivers nothing. Its keys and password are its own,
  * made at random: no real pump's credentials are used.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -76,12 +76,13 @@ void ypso_app_start(void)
         ESP_LOGI(TAG, "a new YpsoPump");
     }
     ypso_init(&pump, &st, &io);
+    store_save_ypso(NULL, &pump.st); /* keeps a server key made for an older save */
     ypso_set_open(&pump, store_load_ypso_open());
     char name[24];
     ypso_name(&st, name);
     ESP_LOGW(TAG, "simulating %s, firmware %s: delivers nothing, for test phones only", name, ypso_fw(st.fw)->master);
     ESP_LOGI(TAG, "%s", pump.open ? "open: any phone gets in without the pump's password"
-                                  : "closed: only the pump's own password (from the key export) gets in");
+                                  : "closed: only the pump's own sign-in password gets in");
     xTaskCreatePinnedToCore(tick_task, "ypso", 4096, NULL, 4, NULL, tskNO_AFFINITY);
 }
 
@@ -174,22 +175,6 @@ static bool command_is(const char *j, const char *name)
     return c && strstr(c, pat);
 }
 
-/* A passphrase for the export: 4 groups of 4, no look-alike characters. */
-static void passphrase(char out[20])
-{
-    static const char A[] = "abcdefghjkmnpqrstuvwxyz23456789";
-    uint8_t r[16];
-    dash_random(r, sizeof r);
-    int k = 0;
-    for (int i = 0; i < 16; i++) {
-        if (i && i % 4 == 0) {
-            out[k++] = '-';
-        }
-        out[k++] = A[r[i] % (sizeof A - 1)];
-    }
-    out[k] = 0;
-}
-
 const char *ypso_app_command(const char *body, char *reply, size_t cap)
 {
     long v;
@@ -220,31 +205,6 @@ const char *ypso_app_command(const char *body, char *reply, size_t cap)
     } else if (command_is(body, "ypsoForgetBonds")) {
         ble_forget_bonds();
         ESP_LOGI(TAG, "Bluetooth bonds forgotten: the phone pairs again");
-    } else if (command_is(body, "ypsoExport")) {
-        /* The session and password, sealed under a fresh passphrase (PBKDF2 at
-         * rockit's minimum count: a few seconds here). */
-        uint8_t bt[6], mac[6];
-        esp_read_mac(bt, ESP_MAC_BT);
-        for (int i = 0; i < 6; i++) {
-            mac[i] = bt[5 - i]; /* least significant first, as NimBLE */
-        }
-        char pass[20];
-        passphrase(pass);
-        char *file = malloc(2048);
-        if (!file) {
-            return "out of memory";
-        }
-        ypso_state_t st;
-        LOCKED(st = pump.st);
-        int n = ypso_key_export(&st, mac, pass, 100000, (int64_t)time(NULL), file, 2048);
-        memset(&st, 0, sizeof st);
-        if (n < 0 || (size_t)n + 64 > cap) {
-            free(file);
-            return "could not make the export";
-        }
-        snprintf(reply, cap, "{\"passphrase\":\"%s\",\"file\":%s}", pass, file);
-        free(file);
-        ESP_LOGI(TAG, "key export made");
     } else {
         return "unknown YpsoPump command";
     }

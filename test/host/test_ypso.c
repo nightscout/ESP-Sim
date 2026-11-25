@@ -5,10 +5,9 @@
 #include <stdlib.h>
 
 #include "dash.h"
-#include "mbedtls/gcm.h"
-#include "mbedtls/md.h"
-#include "mbedtls/pkcs5.h"
-#include "mbedtls/base64.h"
+#include <stdio.h>
+
+#include "dash_internal.h"
 #include "test.h"
 #include "ypso.h"
 
@@ -253,6 +252,18 @@ static void test_ypso_encrypted(void)
     safevar(t, 150);
     safevar(t + 8, 20); /* not a multiple of 15 */
     CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == YPSO_VALUE_INVALID);
+    /* The limits it reports (116-119) are the ones it takes: 500 % for 24 h, not 510 %. */
+    CHECK(read_setting(&ph, 116) == 500 && read_setting(&ph, 117) == 1440 && read_setting(&ph, 118) == 500);
+    safevar(t, 510);
+    safevar(t + 8, 30);
+    CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == YPSO_VALUE_INVALID);
+    safevar(t, 500);
+    safevar(t + 8, 1440);
+    CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == 0);
+    CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == 0 && le32(v + 10) == 500);
+    safevar(t, 100);
+    safevar(t + 8, 0);
+    CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == 0);
 
     /* An extended bolus: 1.00 U over 30 minutes. */
     memset(b, 0, sizeof b);
@@ -272,13 +283,13 @@ static void test_ypso_encrypted(void)
     /* History: newest first from index 0, each entry 19 bytes with its CRC; the index moves on. */
     CHECK(ph_read(&ph, YC_EVENT_COUNT, v, &n) == 0 && n == 8);
     int32_t count = (int32_t)le32(v);
-    CHECK(count == 3); /* bolus, TBR abort, extended (the refused TBR logs nothing) */
+    CHECK(count == 4); /* bolus, two TBR aborts, extended (the refused TBRs log nothing) */
     CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && n == 19);
     CHECK(ypso_crc16(v, 17) == (uint16_t)(v[17] | v[18] << 8));
     CHECK(v[4] == 3 && (v[5] | v[6] << 8) == 100 && (v[15] | v[16] << 8) == 0); /* the extended bolus */
     CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 32 && (v[15] | v[16] << 8) == 1); /* TBR abort */
     uint8_t idx[8];
-    safevar(idx, 2);
+    safevar(idx, 3);
     CHECK(ph_write(&ph, YC_EVENT_INDEX, idx, 8) == 0); /* History 1.4: a SAFEVAR index */
     CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 2 && (v[5] | v[6] << 8) == 200);
     safevar(idx, count);
@@ -341,6 +352,17 @@ static void test_ypso_clear(void)
     /* 18-byte status, no CRC; 13-byte bolus status. */
     CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == 0 && n == 18);
     CHECK(ph_read(&ph, YC_GET_BOLUS_STATUS, v, &n) == 0 && n == 13);
+    /* No extended bolus on Control 1.0/1.1 (HAS_SLOW is verControl > 1.1): the
+     * 15-byte bolus that carries one is refused, nothing starts. */
+    uint8_t ext[15] = {0};
+    ext[4] = 100; /* 1.00 U extended */
+    ext[8] = 30;  /* over 30 min */
+    ext[12] = 2;
+    uint16_t ec = ypso_crc16(ext, 13);
+    ext[13] = (uint8_t)ec;
+    ext[14] = (uint8_t)(ec >> 8);
+    CHECK(ph_write(&ph, YC_START_STOP_BOLUS, ext, 15) == YPSO_VALUE_CORRUPT);
+    CHECK(ph_read(&ph, YC_GET_BOLUS_STATUS, v, &n) == 0 && n == 13 && v[0] == 0);
     /* The OPN bolus: one SAFEVAR. */
     uint8_t sv[8];
     safevar(sv, 100);
@@ -390,59 +412,146 @@ static void test_ypso_open(void)
     CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == YPSO_ATT_INSUFFICIENT_AUTHORIZATION);
 }
 
-static void test_ypso_export(void)
+/* ---- the key exchange ------------------------------------------- */
+
+static void t_hchacha(const uint8_t key[32], const uint8_t nonce[16], uint8_t out[32])
 {
-    ypso_state_t st;
-    ypso_state_fresh(&st, YPSO_FW_V05);
-    st.serial = 12345678;
-    uint8_t mac[6] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x02};
-    static char out[2048];
-    const char *pass = "correct horse battery";
-    int n = ypso_key_export(&st, mac, pass, 100000, 1800000000, out, sizeof out);
-    CHECK(n > 0);
-    CHECK(strstr(out, "\"format\":\"ypso-session-export\"") && strstr(out, "\"pump_serial\":\"12345678\""));
-    CHECK(strstr(out, "\"iterations\":100000") && !strstr(out, "shared_key"));
-    /* Decrypt it the way an importer does. */
-    char salt64[64] = {0}, nonce64[64] = {0}, ct64[1200] = {0};
-    const char *p;
-    p = strstr(out, "\"salt\":\"") + 8;
-    memcpy(salt64, p, strchr(p, '"') - p);
-    p = strstr(out, "\"nonce\":\"") + 9;
-    memcpy(nonce64, p, strchr(p, '"') - p);
-    p = strstr(out, "\"ciphertext\":\"") + 14;
-    memcpy(ct64, p, strchr(p, '"') - p);
-    uint8_t salt[32], nonce[16], ct[1000], key[32], pt[1000];
-    size_t sl, nl, cl;
-    CHECK(mbedtls_base64_decode(salt, sizeof salt, &sl, (const uint8_t *)salt64, strlen(salt64)) == 0 && sl == 16);
-    CHECK(mbedtls_base64_decode(nonce, sizeof nonce, &nl, (const uint8_t *)nonce64, strlen(nonce64)) == 0 && nl == 12);
-    CHECK(mbedtls_base64_decode(ct, sizeof ct, &cl, (const uint8_t *)ct64, strlen(ct64)) == 0 && cl > 16);
-    CHECK(mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256, (const uint8_t *)pass, strlen(pass), salt, 16, 100000, 32,
-                                        key) == 0);
-    mbedtls_gcm_context g;
-    mbedtls_gcm_init(&g);
-    mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, key, 256);
-    CHECK(mbedtls_gcm_auth_decrypt(&g, cl - 16, nonce, 12, NULL, 0, ct + cl - 16, 16, ct, pt) == 0);
-    mbedtls_gcm_free(&g);
-    pt[cl - 16] = 0;
-    const char *s = (const char *)pt;
-    CHECK(strstr(s, "\"pump_mac\":\"02:00:00:00:00:01\""));
-    CHECK(strstr(s, "\"write_counter\":-1") && strstr(s, "\"key_valid_until_source\":\"assumed\""));
-    CHECK(strstr(s, "\"name\":\"YpsoPump_12345678\""));
-    char key_hex[65];
-    for (int i = 0; i < 32; i++) {
-        snprintf(key_hex + 2 * i, 3, "%02x", st.key[i]);
+    uint32_t x[16] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574};
+    for (int i = 0; i < 8; i++) {
+        x[4 + i] = le32(key + 4 * i);
     }
-    CHECK(strstr(s, key_hex) != NULL);
-    char name[24];
-    ypso_name(&st, name);
-    CHECK(strcmp(name, "YpsoPump_12345678") == 0);
+    for (int i = 0; i < 4; i++) {
+        x[12 + i] = le32(nonce + 4 * i);
+    }
+    dash_chacha20_rounds(x);
+    for (int i = 0; i < 4; i++) {
+        memcpy(out + 4 * i, &x[i], 4);
+        memcpy(out + 16 + 4 * i, &x[12 + i], 4);
+    }
 }
 
+/* XChaCha20-Poly1305 with no associated data: out = ct ‖ tag. */
+static void t_xseal(const uint8_t key[32], const uint8_t nonce[24], const uint8_t *p, size_t n, uint8_t *out)
+{
+    uint8_t sub[32], n12[12] = {0};
+    t_hchacha(key, nonce, sub);
+    memcpy(n12 + 4, nonce + 16, 8);
+    dash_chachapoly_seal(sub, n12, p, n, out);
+}
+
+static void t_session_key(const uint8_t priv[32], const uint8_t pub[32], uint8_t out[32])
+{
+    static const uint8_t zero[16];
+    uint8_t shared[32];
+    dash_x25519(shared, priv, pub);
+    t_hchacha(shared, zero, out);
+}
+
+/* The offer: frame 1 of NewPublicKey, then ExtendedRead. */
+static int read_offer(ypso_t *y, uint8_t offer[64])
+{
+    uint8_t pkt[32];
+    size_t len, w = 0;
+    int rc = ypso_on_read(y, YC_NEW_PUBLIC_KEY, pkt, sizeof pkt, &len);
+    if (rc != 0) {
+        return rc;
+    }
+    uint8_t frames = pkt[0] & 0x0f;
+    CHECK(pkt[0] >> 4 == 1 && frames == 4);
+    memcpy(offer, pkt + 1, len - 1);
+    w = len - 1;
+    for (int f = 2; f <= frames; f++) {
+        CHECK(ypso_on_read(y, YC_EXTENDED_READ, pkt, sizeof pkt, &len) == 0 && pkt[0] >> 4 == f);
+        memcpy(offer + w, pkt + 1, len - 1);
+        w += len - 1;
+    }
+    CHECK(w == 64);
+    return 0;
+}
+
+/* Rockit's side (key_exchange.rs prepare, the server's public key in the blob):
+ * the blob, framed into WriteChallengeUtcAppPubKey. The session key out. */
+static int write_blob(ypso_t *y, const uint8_t offer[64], const uint8_t server[32], uint64_t counter,
+                      uint8_t session[32])
+{
+    uint8_t server_pub[32], ks[32], pt[76], blob[116], nonce[24];
+    dash_x25519_base(server_pub, server);
+    t_session_key(server, offer + 32, ks);
+    memcpy(pt, offer, 32);
+    uint32_t ttl = 28 * 86400;
+    memcpy(pt + 32, &ttl, 4);
+    memcpy(pt + 36, server_pub, 32);
+    memcpy(pt + 68, &counter, 8);
+    dash_random(nonce, sizeof nonce);
+    t_xseal(ks, nonce, pt, 76, blob);
+    memcpy(blob + 92, nonce, 24);
+    memcpy(session, ks, 32);
+    int rc = 0;
+    for (int f = 0; f < 7; f++) {
+        uint8_t pkt[20];
+        size_t k = 116 - f * 19 < 19 ? 116 - f * 19 : 19;
+        pkt[0] = (uint8_t)(((f + 1) << 4) | 7);
+        memcpy(pkt + 1, blob + f * 19, k);
+        rc = ypso_on_write(y, YC_WRITE_CHALLENGE, pkt, k + 1);
+        if (rc != 0) {
+            break;
+        }
+    }
+    return rc;
+}
+
+static void test_ypso_key_exchange(void)
+{
+    static ypso_t y;
+    ypso_state_t st;
+    ypso_state_fresh(&st, YPSO_FW_V05);
+    ypso_init(&y, &st, &yio);
+    ypso_set_open(&y, true);
+    ypso_on_connect(&y);
+    CHECK(ypso_on_write(&y, YC_AUTH_PASSWORD, st.password, 16) == 0);
+    uint8_t offer[64], session[32], v[64];
+    size_t n;
+    CHECK(read_offer(&y, offer) == 0);
+    uint8_t pub[32];
+    ypso_pump_public(&y.st, pub);
+    CHECK(memcmp(offer + 32, pub, 32) == 0);
+
+    /* A server key the pump does not trust: 0x8A, the old key stays. */
+    uint8_t other[32];
+    memset(other, 0x44, 32);
+    CHECK(write_blob(&y, offer, other, 5, session) == YPSO_ENCRYPTION_FAILED);
+    CHECK(memcmp(y.st.key, st.key, 32) == 0);
+
+    /* The trusted one: the new key, counters from the bottom. */
+    CHECK(read_offer(&y, offer) == 0);
+    CHECK(write_blob(&y, offer, y.st.server_priv, 1800000000000ULL, session) == 0);
+    CHECK(memcmp(y.st.key, session, 32) == 0 && memcmp(y.st.key, st.key, 32) != 0);
+    CHECK(y.st.read_counter == 0 && y.st.write_counter == 0 && y.st.kx_counter == 1800000000000ULL);
+    /* The proving read, then a command, under the new key; the reboot counter learnt from the read. */
+    phone_t ph = {.y = &y, .encrypted = true};
+    memcpy(ph.key, session, 32);
+    CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == 0 && n == 20);
+    CHECK(read_setting(&ph, 2) == 10);
+
+    /* The same blob again: no offer read since, refused. A counter not above the last: 0x8B. */
+    CHECK(write_blob(&y, offer, y.st.server_priv, 1800000000001ULL, session) == YPSO_ENCRYPTION_FAILED);
+    CHECK(read_offer(&y, offer) == 0);
+    CHECK(write_blob(&y, offer, y.st.server_priv, 1800000000000ULL, session) == YPSO_COUNTER_ERROR);
+    CHECK(read_setting(&ph, 2) == 10); /* still on the key it took */
+
+    /* Closed and not signed in: no offer. */
+    ypso_set_open(&y, false);
+    ypso_on_disconnect(&y);
+    ypso_on_connect(&y);
+    CHECK(read_offer(&y, offer) == YPSO_ATT_INSUFFICIENT_AUTHORIZATION);
+}
+
+/* RFC 7693 and RFC 9106 test vectors. */
 void test_ypso_all(void)
 {
     test_ypso_vectors();
     test_ypso_encrypted();
     test_ypso_clear();
     test_ypso_open();
-    test_ypso_export();
+    test_ypso_key_exchange();
 }

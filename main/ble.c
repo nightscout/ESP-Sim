@@ -456,6 +456,44 @@ static void security_for(bool pump_link)
     bool display = pump_link && ypso_mode;
     ble_hs_cfg.sm_io_cap = display ? BLE_HS_IO_DISPLAY_ONLY : BLE_HS_IO_NO_INPUT_OUTPUT;
     ble_hs_cfg.sm_mitm = display;
+    /* The pump's Pairing Response, from a phone's capture (rockit
+     * docs/ble-pair.md): it gives only its long-term key and asks for the
+     * central's identity (initiator 0x02, responder 0x01). */
+    ble_hs_cfg.sm_our_key_dist = display ? BLE_SM_PAIR_KEY_DIST_ENC : BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = display ? BLE_SM_PAIR_KEY_DIST_ID : BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+}
+
+/* Like the real pump: bonds with up to 5 devices, the oldest forgotten when a
+ * sixth pairs (the CGM's bonds are its own and not counted here). */
+#define YPSO_MAX_PEERS 5
+
+static void ypso_note_peer(uint16_t conn)
+{
+    struct ble_gap_conn_desc d;
+    if (ble_gap_conn_find(conn, &d) != 0 || !d.sec_state.bonded) {
+        return;
+    }
+    uint8_t list[7 * (YPSO_MAX_PEERS + 1)];
+    size_t n = store_load_ypso_peers(list, 7 * YPSO_MAX_PEERS) / 7;
+    uint8_t me[7] = {d.peer_id_addr.type};
+    memcpy(me + 1, d.peer_id_addr.val, 6);
+    for (size_t i = 0; i < n; i++) {
+        if (memcmp(list + 7 * i, me, 7) == 0) { /* known: move it to the newest */
+            memmove(list + 7 * i, list + 7 * (i + 1), 7 * (n - i - 1));
+            n--;
+            break;
+        }
+    }
+    memcpy(list + 7 * n++, me, 7);
+    while (n > YPSO_MAX_PEERS) {
+        ble_addr_t old = {.type = list[0]};
+        memcpy(old.val, list + 1, 6);
+        ble_store_util_delete_peer(&old);
+        ESP_LOGI(TAG, "a sixth device bonded: the oldest bond forgotten");
+        memmove(list, list + 7, 7 * --n);
+    }
+    store_save_ypso_peers(list, 7 * n);
+    ESP_LOGI(TAG, "YpsoPump bonded devices: %u of %d", (unsigned)n, YPSO_MAX_PEERS);
 }
 
 static int pod_gap_event(struct ble_gap_event *event, void *arg)
@@ -499,6 +537,9 @@ static int pod_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "pump link encryption %s (status %d)", event->enc_change.status == 0 ? "on" : "failed",
                  event->enc_change.status);
         passkey_shown = -1;
+        if (ypso_mode && event->enc_change.status == 0) {
+            ypso_note_peer(event->enc_change.conn_handle);
+        }
         break;
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
@@ -608,8 +649,6 @@ void ble_start(bool ypso, uint8_t fw, const char *ypso_name)
     ble_hs_cfg.sm_bonding = 1;
     security_for(true);
     ble_hs_cfg.sm_sc = 0;
-    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     /* Not NimBLE's GAP service: ours answers the name per connection. Only
      * the chosen pump's services: the pod's, or the YpsoPump's. */
     ble_svc_gatt_init();
@@ -635,6 +674,7 @@ int32_t ble_passkey(void)
 void ble_forget_bonds(void)
 {
     ble_store_clear();
+    store_save_ypso_peers(NULL, 0);
 }
 
 bool ble_connected(void)

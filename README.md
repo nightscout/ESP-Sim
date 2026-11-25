@@ -236,26 +236,35 @@ the CGM). It follows the rockit YpsoPump driver (`rockit-driver-ypso`,
 | V65.00.06, V03.00.00 | OPN: no Crypto service (everything raw, unframed), Control 1.0 / 1.1, 8-byte SAFEVAR bolus, 13-byte bolus status, 18-byte system status, u16 history indexes, 10 % temp-basal steps |
 | V02.00.00 | the oldest baseline: no Control service |
 
-- **Credentials:** the simulated pump makes its own random session key and
-  authorisation password when it becomes a new pump. No real pump's key,
-  password, rotation table or certificate is used. *Download the key export*
-  gives a `ypso-session-export` file (rockit `docs/KEY-EXPORT.md`) carrying the
-  session and the password, sealed under a passphrase the panel shows; import
-  it with rockit's `pump-provision export` or the phone app.
+- **Keys:** the simulated pump makes its own random keys and sign-in password
+  when it becomes a new pump. No real pump's key, password or vendor key is
+  used.
+- **Encryption (V05, V35):** the pump runs the key exchange an encrypted
+  YpsoPump runs: the phone reads `NewPublicKey` (a fresh challenge and the
+  pump's X25519 public key) and writes an authorisation blob to
+  `WriteChallengeUtcAppPubKey`, sealed with a server key the pump trusts; both
+  sides then hold the new session key (XChaCha20-Poly1305, counters from the
+  bottom). A blob that does not open is refused `0x8A`, a counter not above the
+  last exchange's `0x8B`. A stock pump trusts the vendor's server key; this one
+  trusts its own, made at random on the board; the panel does not hand it
+  out, so a phone cannot run the key exchange with it yet. The clear-text firmware
+  (V65, V03, V02) needs none of this.
 - **Bluetooth:** it advertises as `YpsoPump_<serial>` from the board's own
   address and bonds before anything but its version strings can be read. Like
   the real pump it pairs by passkey: when the phone asks for a code, the
   6-digit passkey appears at the top of the panel's *YpsoPump* card (and in
   the serial log); type that on the phone. If an earlier try left a stale
   pairing, forget the pump on the phone and press *Forget Bluetooth bonds*.
-- **Password:** by default the simulated pump lets any phone in without its
-  authorisation password (or with any password), so rockit connects to it
-  without a key file. A real pump never does this; untick *Let any phone in*
-  in the *YpsoPump* card to need the pump's own password, from the key
-  export. The clear-text firmware (V65, V03, V02) then works with nothing to
-  import. The encrypted firmware (V05, V35) still needs the key export: its
-  messages are sealed with a session key that only the export carries.
-- **Simulated:** basal and temp basal (100 % cancels; a second one while one
+  Like the real pump it keeps bonds with up to 5 devices (phones, watches),
+  forgetting the oldest when a sixth pairs, and talks to one at a time: it
+  stops advertising while a device is connected.
+- **Sign-in password:** by default the simulated pump lets any phone in
+  without its authorisation password (or with any password), so an app that
+  has none for it works at once. A real pump never does this; untick *Let any
+  phone in* in the *YpsoPump* card to refuse a phone without the pump's own
+  password (`0x08`), like a real pump.
+- **Simulated:** basal and temp basal (up to 500 % for up to 24 h, the limits it
+  reports in settings 116-119; 100 % cancels; a second one while one
   runs is refused `0x86`), immediate, extended and combination boluses with
   progress, stop, the settings the driver reads (serial, basal profiles A/B,
   limits), the event history, counters, the clock, the error codes (`0x08`
@@ -265,7 +274,9 @@ the CGM). It follows the rockit YpsoPump driver (`rockit-driver-ypso`,
 
 The host tests check it against the driver spec's golden vectors (the pump
 CRC and an XChaCha20 frame) and run whole sessions on encrypted and clear-text
-firmware. **It has not yet been tested against the rockit driver itself.**
+firmware, and a key exchange made the way rockit makes it. Rockit has
+connected to the clear-text firmware (V65); the key exchange has not yet run
+against rockit itself.
 
 ## License
 
