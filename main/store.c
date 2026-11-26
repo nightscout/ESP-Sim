@@ -102,8 +102,17 @@ bool store_load_cgm(cgm_state_t *st)
      * as zero (the manual pattern), and the sensor stays the same. */
     memset(st, 0, sizeof *st);
     size_t len = sizeof *st;
-    return nvs_get_blob(nvs, "cgm", st, &len) == ESP_OK && len >= offsetof(cgm_state_t, pattern) &&
-           len <= sizeof *st && st->version == CGM_STATE_VERSION;
+    if (nvs_get_blob(nvs, "cgm", st, &len) != ESP_OK || len < offsetof(cgm_state_t, pattern) || len > sizeof *st) {
+        return false;
+    }
+    if (st->version == 2) {
+        /* Saved by the per-central CGM (version 2): the same layout up to the
+         * last 4 bytes, which held its sine settings. The receiver slot starts
+         * again from nothing; the sensor and its id stay the same. */
+        st->delivered_rx = 0;
+        st->version = CGM_STATE_VERSION;
+    }
+    return st->version == CGM_STATE_VERSION;
 }
 
 void store_save_cgm(void *ctx, const cgm_state_t *st)
