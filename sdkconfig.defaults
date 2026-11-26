@@ -1,6 +1,10 @@
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Two app slots (partitions.csv): firmware over Wi-Fi at /ota, rolled back
+# by the bootloader if it does not stay up.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # Bluetooth: NimBLE, peripheral only. Two devices (pod and CGM), each its own

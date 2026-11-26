@@ -126,6 +126,9 @@ typedef struct {
     uint16_t icr;           /* grams of carbohydrate one unit covers */
     uint16_t basal_need;    /* hundredths of a unit an hour that hold glucose level */
     cgm_person_t person;
+    /* G6 receiver slot (0x01: a receiver, pump or watch): the last reading's
+     * seq it was sent. `delivered` above is the phone app's slot (0x02). */
+    uint32_t delivered_rx;
 } cgm_state_t;
 
 typedef struct {
@@ -156,10 +159,15 @@ typedef struct {
     uint8_t auth_value[17];   /* what a read of the auth characteristic returns */
     uint8_t auth_len;
     int64_t connected_at, last_activity;
-    uint32_t prev_delivered;  /* st.delivered when this connection began */
+    uint32_t prev_delivered;  /* this connection's slot's last reading when it began */
+    uint8_t slot;             /* G6: 0x01 receiver, 0x02 phone app (also a passive client) */
+    bool slot_named;          /* G6: this connection's AuthRequestTx said its slot */
+    uint32_t pushed_seq;      /* the reading pushed on subscribe before a login (0 none):
+                               * counted for the slot it then logs in to, else the app's */
     /* Advertising. */
     bool advertising;
     int64_t window_end;
+    int64_t rx_until;         /* G6: advertise for the receiver slot until then */
 } cgm_t;
 
 /* A fresh G6 transmitter (id NULL: a random one) or G7 sensor, started now. */

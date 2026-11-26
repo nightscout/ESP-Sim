@@ -425,7 +425,8 @@ static void test_g6_active(void)
     send_cmd(&c, (const uint8_t *)"\x32", 1);
     CHECK(fk.n_sent == 2 && le16(fk.sent[1].p + 11) == 110 && le32(fk.sent[1].p + 13) == 20);
 
-    /* A wrong challenge answer is refused. */
+    /* A wrong challenge answer is refused (on the receiver slot: the phone's has this reading). */
+    tok[9] = 0x01;
     cgm_on_write(&c, CGM_CHR_AUTH, tok, sizeof tok);
     cgm_on_read(&c, CGM_CHR_AUTH, v, sizeof v);
     uint8_t bad[9] = {0x04};
@@ -444,6 +445,124 @@ static void test_g6_active(void)
     int d = fk.disconnects;
     cgm_on_write(&c, CGM_CHR_CONTROL, (const uint8_t *)"\x09", 1);
     CHECK(fk.disconnects == d + 1);
+}
+
+/* ---- G6 slots: the phone app and a watch in the same window ---------------------- */
+
+/* Logs in on `slot` (active mode). False if the transmitter hung up instead. */
+static bool login(cgm_t *c, const char *id, uint8_t slot)
+{
+    int d = fk.disconnects;
+    uint8_t tok[10] = {0x01, 9, 8, 7, 6, 5, 4, 3, 2, slot}, v[32];
+    cgm_on_write(c, CGM_CHR_AUTH, tok, sizeof tok);
+    if (fk.disconnects != d) {
+        return false;
+    }
+    size_t n = cgm_on_read(c, CGM_CHR_AUTH, v, sizeof v);
+    uint8_t ch[9] = {0x04};
+    cgm_g6_hash(id, v + 9, ch + 1);
+    cgm_on_write(c, CGM_CHR_AUTH, ch, sizeof ch);
+    n = cgm_on_read(c, CGM_CHR_AUTH, v, sizeof v);
+    return n == 3 && v[1] == 0x01;
+}
+
+static bool read_glucose(cgm_t *c)
+{
+    clear_sent();
+    send_cmd(c, (const uint8_t *)"\x30", 1);
+    return find(CGM_CHR_CONTROL, 0x31, 0) >= 0;
+}
+
+static void test_g6_slots(void)
+{
+    static cgm_t c;
+    cgm_state_t st;
+    memset(&fk, 0, sizeof fk);
+    fk.now = 1800000000;
+    cgm_state_fresh(&st, CGM_G6, "8G1234", fk.now);
+    cgm_init(&c, &st, &fio);
+    cgm_skip_warmup(&c);
+    run(&c, CGM_READING_INTERVAL); /* a fresh window */
+    CHECK(fk.advertising);
+
+    /* The phone app (slot 2) first. When it lets go, the transmitter is there for the watch. */
+    connect(&c);
+    CHECK(login(&c, "8G1234", 0x02) && read_glucose(&c));
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(fk.advertising);
+    /* The phone again: its slot has the reading, so it is let go at once. */
+    connect(&c);
+    CHECK(!login(&c, "8G1234", 0x02));
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(fk.advertising);
+    /* The watch (slot 1) gets the same reading. Then nothing is left to give. */
+    connect(&c);
+    CHECK(login(&c, "8G1234", 0x01) && read_glucose(&c));
+    CHECK(c.st.delivered_rx == c.st.delivered);
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(!fk.advertising);
+
+    /* The next window: the watch first, then the phone, whose slot is due all window. */
+    for (int i = 0; i < CGM_READING_INTERVAL && !fk.advertising; i++) {
+        run(&c, 1);
+    }
+    connect(&c);
+    CHECK(login(&c, "8G1234", 0x01) && read_glucose(&c));
+    cgm_on_disconnect(&c);
+    run(&c, 20);
+    CHECK(fk.advertising);
+    connect(&c);
+    CHECK(login(&c, "8G1234", 0x02) && read_glucose(&c));
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(!fk.advertising);
+
+    /* The watch as rockit's does it: it subscribes to the control messages
+     * first (the reading is pushed, as to a passive client) and then logs in
+     * on the receiver slot. The phone app's slot keeps its turn. */
+    for (int i = 0; i < CGM_READING_INTERVAL && !fk.advertising; i++) {
+        run(&c, 1);
+    }
+    connect(&c);
+    clear_sent();
+    cgm_on_subscribe(&c, CGM_CHR_CONTROL, true);
+    CHECK(find(CGM_CHR_CONTROL, 0x4f, 0) >= 0);
+    CHECK(login(&c, "8G1234", 0x01) && read_glucose(&c));
+    CHECK(c.st.delivered_rx != c.st.delivered);
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(fk.advertising);
+    connect(&c);
+    CHECK(login(&c, "8G1234", 0x02));
+    CHECK(read_glucose(&c));
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(!fk.advertising);
+    /* A passive client that never logs in: the phone app's session, so its slot. */
+    for (int i = 0; i < CGM_READING_INTERVAL && !fk.advertising; i++) {
+        run(&c, 1);
+    }
+    uint32_t app = c.st.delivered;
+    connect(&c);
+    cgm_on_subscribe(&c, CGM_CHR_CONTROL, true);
+    cgm_on_disconnect(&c);
+    CHECK(c.st.delivered != app);
+    run(&c, 70); /* past this window */
+
+    /* No watch at all: after the phone, the receiver slot's chance is short. */
+    for (int i = 0; i < CGM_READING_INTERVAL && !fk.advertising; i++) {
+        run(&c, 1);
+    }
+    connect(&c);
+    CHECK(login(&c, "8G1234", 0x02) && read_glucose(&c));
+    cgm_on_disconnect(&c);
+    run(&c, 1);
+    CHECK(fk.advertising);
+    run(&c, 10);
+    CHECK(!fk.advertising);
 }
 
 static void test_status(void)
@@ -474,6 +593,7 @@ void test_cgm_all(void)
     test_g7();
     test_g6_passive();
     test_g6_active();
+    test_g6_slots();
     test_status();
     test_person();
 }
@@ -559,6 +679,38 @@ static void test_person(void)
     person_days(CGM_INSULIN_PUMP, 1, &lo, &hi, &mean, &sd, &tir, &below, &changes, false);
     printf("  person, no insulin, 1 day: %d-%d mg/dL, mean %.0f\n", lo, hi, mean);
     CHECK(hi >= 390);
+
+    /* The panel's Set moves the person's own glucose: the readings carry on
+     * from it, not from where the person was (stuck high above 400). */
+    {
+        static cgm_t c;
+        static cgm_io_t io;
+        io = fio;
+        io.utc_offset = f_utc;
+        io.pump_insulin = f_pump;
+        memset(&fk, 0, sizeof fk);
+        fk.now = 1800000000;
+        pump_total = 0;
+        cgm_state_t st;
+        cgm_state_fresh(&st, CGM_G6, NULL, fk.now);
+        cgm_init(&c, &st, &io);
+        cgm_skip_warmup(&c);
+        cgm_set_pattern(&c, CGM_PATTERN_PERSON, CGM_INSULIN_PUMP, 45, 10, 80);
+        c.st.person.g_milli = 598000;
+        cgm_set_glucose(&c, 120, 0);
+        CHECK(c.st.person.g_milli == 120000);
+        uint32_t seen = c.st.n_hist ? c.st.hist[c.st.n_hist - 1].seq : 0;
+        int got = 0;
+        for (int s = 0; s < 20 * 60 && !got; s++) {
+            fk.now++;
+            cgm_tick(&c);
+            if (c.st.n_hist && c.st.hist[c.st.n_hist - 1].seq != seen && c.st.hist[c.st.n_hist - 1].glucose) {
+                got = c.st.hist[c.st.n_hist - 1].glucose;
+            }
+        }
+        printf("  person set to 120 from 598: next reading %d mg/dL\n", got);
+        CHECK(got > 80 && got < 180);
+    }
 
     /* The food names. */
     CHECK(strcmp(cgm_food_name(0), "porridge with banana") == 0);

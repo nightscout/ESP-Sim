@@ -46,6 +46,32 @@ void store_save_state(void *ctx, const dash_state_t *st)
     }
 }
 
+/* The board's last known time (Unix seconds), saved now and then: without a
+ * network a restart picks up from it instead of from an old save. */
+bool store_load_clock(int64_t *t)
+{
+    return nvs_get_i64(nvs, "clock", t) == ESP_OK;
+}
+
+void store_save_clock(int64_t t)
+{
+    nvs_set_i64(nvs, "clock", t);
+    nvs_commit(nvs);
+}
+
+/* The board's time zone (POSIX TZ), from the panel's browser. */
+bool store_load_tz(char tz[64])
+{
+    size_t len = 64;
+    return nvs_get_str(nvs, "tz", tz, &len) == ESP_OK && tz[0];
+}
+
+void store_save_tz(const char *tz)
+{
+    nvs_set_str(nvs, "tz", tz);
+    nvs_commit(nvs);
+}
+
 bool store_load_wifi(char ssid[33], char password[65])
 {
     size_t l1 = 33, l2 = 65;

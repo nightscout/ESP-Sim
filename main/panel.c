@@ -31,6 +31,15 @@ extern const char panel_html_end[] asm("_binary_panel_html_end");
 
 /* ---- Wi-Fi ----------------------------------------------------------------- */
 
+/* The network's time arrived (at first and about hourly). */
+static void on_time_sync(struct timeval *tv)
+{
+    if (store_load_pump() == 1) {
+        ypso_app_clock_changed();
+    }
+}
+
+
 static int sta_failures;
 static bool ap_started;
 static bool sntp_started;
@@ -82,6 +91,7 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (!sntp_started) {
             sntp_started = true;
             esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+            cfg.sync_cb = on_time_sync;
             esp_netif_sntp_init(&cfg);
         }
     }
@@ -216,7 +226,7 @@ static esp_err_t send_ypso(httpd_req_t *req)
 }
 
 static void restart(void *arg);
-static void restart_soon(void);
+void restart_soon(void);
 
 static esp_err_t post_ypso(httpd_req_t *req)
 {
@@ -330,7 +340,7 @@ static void restart(void *arg)
     esp_restart();
 }
 
-static void restart_soon(void)
+void restart_soon(void)
 {
     static esp_timer_handle_t t;
     const esp_timer_create_args_t args = {.callback = restart, .name = "restart"};
@@ -358,6 +368,49 @@ static esp_err_t post_wifi(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /tz: the board's zone. POST /tz {"tz": "<POSIX TZ>"}: the panel's
+ * browser sends its own, so the board (and the pump's clock) keep local time. */
+static esp_err_t get_tz(httpd_req_t *req)
+{
+    const char *tz = getenv("TZ");
+    char out[96];
+    snprintf(out, sizeof out, "{\"tz\":\"%s\"}", tz ? tz : "");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
+static esp_err_t post_tz(httpd_req_t *req)
+{
+    char body[160] = {0}, tz[64];
+    int got = 0;
+    while (got < req->content_len && got < (int)sizeof body - 1) {
+        int r = httpd_req_recv(req, body + got, sizeof body - 1 - got);
+        if (r <= 0) {
+            return httpd_resp_send_500(req);
+        }
+        got += r;
+    }
+    if (!json_string(body, "tz", tz, sizeof tz) || !tz[0]) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "want {\"tz\": \"<POSIX TZ>\"}");
+        return ESP_OK;
+    }
+    for (const char *c = tz; *c; c++) {
+        if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') ||
+              strchr(",./:+-<>", *c))) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a POSIX TZ");
+            return ESP_OK;
+        }
+    }
+    const char *old = getenv("TZ");
+    if (!old || strcmp(old, tz) != 0) {
+        store_save_tz(tz);
+        setenv("TZ", tz, 1);
+        tzset();
+        ESP_LOGI(TAG, "time zone now %s", tz); /* the pump follows within a second (ypso_app.c) */
+    }
+    return get_tz(req);
+}
+
 void panel_start(dash_pod_t *pod)
 {
     the_pod = pod;
@@ -365,7 +418,7 @@ void panel_start(dash_pod_t *pod)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 12288; /* room for the larger handlers */
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 20;
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &cfg));
     const httpd_uri_t routes[] = {
@@ -377,8 +430,11 @@ void panel_start(dash_pod_t *pod)
         {.uri = "/cgm", .method = HTTP_POST, .handler = post_cgm},
         {.uri = "/ypso", .method = HTTP_GET, .handler = send_ypso},
         {.uri = "/ypso", .method = HTTP_POST, .handler = post_ypso},
+        {.uri = "/tz", .method = HTTP_GET, .handler = get_tz},
+        {.uri = "/tz", .method = HTTP_POST, .handler = post_tz},
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; i++) {
         httpd_register_uri_handler(server, &routes[i]);
     }
+    remote_start(server);
 }

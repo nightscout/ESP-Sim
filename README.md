@@ -45,6 +45,35 @@ idf.py -p /dev/cu.usbmodem1101 build flash monitor
 
 (Use your board's port: `ls /dev/cu.usbmodem*`.)
 
+**Local time.** The board keeps the local time of wherever its control panel
+is opened: the panel sends the browser's time zone, and the board keeps it.
+The simulated YpsoPump's clock follows: at start-up, at each network time
+sync, and when the zone or daylight saving changes, it is set to local time
+as a person would set it, with a date and time change in its history.
+
+**Over Wi-Fi.** Once the board is on your network (or you are on its access
+point), it serves its log and takes new firmware there. Anyone on the same
+network can do both, as with the control panel: keep it to a network you
+trust.
+
+- `GET /log?since=N`: the board's last 32 KB of log. The `X-Log-Next` header
+  is the `N` for the next call.
+- `POST /ota` with `build/esp_sim_dash.bin` as the body: written to the other
+  app slot, checked, and booted. If the new firmware does not stay up for a
+  minute, the bootloader goes back to the one before.
+
+```bash
+tools/remote.sh log 192.168.1.50
+```
+
+```bash
+tools/remote.sh flash 192.168.1.50
+```
+
+The flash is laid out in two app slots for this (`partitions.csv`). A board
+flashed before then needs one USB flash to move to that layout; the saved
+pump, CGM, Bluetooth bonds and Wi-Fi stay where they are and are kept.
+
 ## Using it
 
 At boot the board advertises as an unpaired DASH pod named ` :: Fake POD ::`.
@@ -184,6 +213,11 @@ The CGM follows the code apps use: LoopKit's
 - **Each reading** opens a minute of advertising. The phone connects, gets the
   reading (and any it missed: backfill), and the CGM hangs up, as the real
   ones do.
+- **Two G6 slots,** as a real transmitter: the phone app (slot 2, and any app
+  that only listens) and a receiver, pump or watch (slot 1) each get every
+  reading. When one lets go the transmitter advertises again for the other
+  (for 10 seconds if only the receiver slot is still due, since there may be
+  none), and a slot that already has the reading is let go at once.
 - **No Dexcom app is needed.** Both apps normally watch the Dexcom app talk to
   the sensor; the simulator sends the messages the Dexcom app's session would
   produce. A G6 app can also log in itself (CGMBLEKit's active mode, with the
@@ -257,7 +291,9 @@ the CGM). It follows the rockit YpsoPump driver (`rockit-driver-ypso`,
   pairing, forget the pump on the phone and press *Forget Bluetooth bonds*.
   Like the real pump it keeps bonds with up to 5 devices (phones, watches),
   forgetting the oldest when a sixth pairs, and talks to one at a time: it
-  stops advertising while a device is connected.
+  stops advertising while a device is connected. The CGM keeps its own bonds beside
+  the pump's, so a watch can be bonded to both, and *Forget Bluetooth bonds*
+  forgets only the pump's.
 - **Sign-in password:** by default the simulated pump lets any phone in
   without its authorisation password (or with any password), so an app that
   has none for it works at once. A real pump never does this; untick *Let any
@@ -267,7 +303,9 @@ the CGM). It follows the rockit YpsoPump driver (`rockit-driver-ypso`,
   reports in settings 116-119; 100 % cancels; a second one while one
   runs is refused `0x86`), immediate, extended and combination boluses with
   progress, stop, the settings the driver reads (serial, basal profiles A/B,
-  limits), the event history, counters, the clock, the error codes (`0x08`
+  limits), the event history (a bolus or temp basal writes its `_RUNNING`
+  entry when it starts and is rewritten in place, same sequence and start
+  stamp, when it ends, as the pump does), counters, the clock, the error codes (`0x08`
   wrong password, `0x8A` wrong key, `0x8B` counter behind, `0x81`-`0x87`).
   The panel sets the reservoir (or no cartridge), battery, suspend, and
   restarts the pump (reboot counter +1).

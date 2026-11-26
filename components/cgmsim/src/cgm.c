@@ -29,6 +29,15 @@
 #define WINDOW 60    /* seconds of advertising per reading */
 #define IDLE_END 3   /* seconds of quiet, once the reading is out, before hanging up */
 #define CONN_MAX 30  /* seconds a connection may last */
+/* G6 slots. A real transmitter serves the phone app (slot 0x02) and a
+ * receiver, pump or watch (slot 0x01) in the same window: the second gets in
+ * as the first lets go (rockit's CGM Read on a real G6, 2026-10). So it
+ * advertises again after a link ends while the other slot has not had the
+ * reading, for a short while if that is only the receiver's (there may be
+ * none), and hangs up at once on a slot that already has it. */
+#define SLOT_RX 0x01
+#define SLOT_APP 0x02
+#define RX_GRACE 10 /* seconds of advertising for the receiver slot after a link ends */
 #define NO_TREND 0x7f
 
 static const char ID_CHARS[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -341,11 +350,13 @@ void cgm_tick(cgm_t *c)
         st->next_n = n + 1;
         save(c);
         c->window_end = now + WINDOW;
+        c->rx_until = c->window_end; /* until a link ends: either slot may come first */
     }
     const cgm_reading_t *r = latest(c);
-    bool undelivered = r && r->seq != st->delivered;
+    bool app_due = r && r->seq != st->delivered;
+    bool rx_due = r && st->kind == CGM_G6 && r->seq != st->delivered_rx && now < c->rx_until;
     if (!c->connected) {
-        advertise(c, undelivered && !st->signal_loss && now < c->window_end);
+        advertise(c, (app_due || rx_due) && !st->signal_loss && now < c->window_end);
     } else if ((c->sent_glucose && now - c->last_activity >= IDLE_END) || now - c->connected_at >= CONN_MAX) {
         logf_(c, "hanging up");
         c->io->disconnect(c->io->ctx);
@@ -361,21 +372,42 @@ void cgm_on_connect(cgm_t *c)
     c->authed = false;
     c->auth_len = 0;
     c->connected_at = c->last_activity = now;
+    c->slot = SLOT_APP; /* until an AuthRequestTx names another */
+    c->slot_named = false;
+    c->pushed_seq = 0;
     c->prev_delivered = c->st.delivered;
     logf_(c, "phone connected");
 }
 
+static void delivered(cgm_t *c, const cgm_reading_t *r);
+
 void cgm_on_disconnect(cgm_t *c)
 {
     c->connected = false;
+    /* A reading pushed to a device that never said its slot: a passive
+     * client, sharing the phone app's session. */
+    const cgm_reading_t *r = latest(c);
+    if (c->pushed_seq && !c->slot_named && r && r->seq == c->pushed_seq) {
+        c->slot = SLOT_APP;
+        delivered(c, r);
+    }
+    c->pushed_seq = 0;
+    if (c->st.kind == CGM_G6) {
+        /* The receiver slot gets a short chance now, if it has not had the reading. */
+        int64_t until = c->io->now(c->io->ctx) + RX_GRACE;
+        if (c->rx_until > until || c->slot == SLOT_APP) {
+            c->rx_until = until;
+        }
+    }
     logf_(c, "phone disconnected");
 }
 
 static void delivered(cgm_t *c, const cgm_reading_t *r)
 {
     c->sent_glucose = true;
-    if (c->st.delivered != r->seq) {
-        c->st.delivered = r->seq;
+    uint32_t *d = c->slot == SLOT_RX ? &c->st.delivered_rx : &c->st.delivered;
+    if (*d != r->seq) {
+        *d = r->seq;
         save(c);
     }
 }
@@ -394,6 +426,14 @@ static void push_glucose(cgm_t *c)
     } else {
         send(c, CGM_CHR_CONTROL, m, cgm_g6_time_msg(&c->st, now, m));
         send(c, CGM_CHR_CONTROL, m, cgm_g6_glucose_msg(&c->st, r, 0x4f, m));
+    }
+    if (c->st.kind == CGM_G6 && !c->slot_named) {
+        /* Whose reading it is waits for the login (a device that subscribes
+         * first may log in on the receiver slot): the phone app's slot must
+         * not lose its turn to it. */
+        c->sent_glucose = true;
+        c->pushed_seq = r->seq;
+        return;
     }
     delivered(c, r);
 }
@@ -591,7 +631,23 @@ void cgm_on_write(cgm_t *c, cgm_chr_t chr, const uint8_t *p, size_t n)
     }
     if (chr == CGM_CHR_AUTH) {
         if (p[0] == 0x01 && n >= 9 && c->st.kind == CGM_G6) {
-            /* AuthRequestTx: 01 token(8) 02. Answer 03 hash(token) challenge. */
+            /* AuthRequestTx: 01 token(8) slot. Answer 03 hash(token) challenge. */
+            c->slot = n >= 10 && p[9] == SLOT_RX ? SLOT_RX : SLOT_APP;
+            c->slot_named = true;
+            c->prev_delivered = c->slot == SLOT_RX ? c->st.delivered_rx : c->st.delivered;
+            const cgm_reading_t *r = latest(c);
+            if (r && r->seq == c->prev_delivered && c->io->now(c->io->ctx) < c->window_end) {
+                /* This slot already has this window's reading: the other's turn. */
+                logf_(c, "slot %u already has reading %u: hanging up", (unsigned)c->slot, (unsigned)r->seq);
+                c->pushed_seq = 0;
+                c->io->disconnect(c->io->ctx);
+                return;
+            }
+            if (r && c->pushed_seq == r->seq) {
+                delivered(c, r); /* the reading pushed on subscribe: this slot's */
+                c->pushed_seq = 0;
+            }
+            logf_(c, "login on the %s slot", c->slot == SLOT_RX ? "receiver" : "phone app");
             c->auth_value[0] = 0x03;
             cgm_g6_hash(c->st.id, p + 1, c->auth_value + 1);
             dash_random(c->challenge, 8);
@@ -640,6 +696,14 @@ void cgm_set_glucose(cgm_t *c, uint16_t glucose, int8_t trend)
 {
     c->st.glucose = glucose < 40 ? 40 : glucose > 400 ? 400 : glucose;
     c->st.trend = trend;
+    if (c->st.pattern == CGM_PATTERN_PERSON) {
+        /* The virtual person's own glucose moves there and carries on from it
+         * (their meals, insulin on board and the rest unchanged): otherwise the
+         * next reading would put it straight back. */
+        c->st.person.g_milli = (int64_t)c->st.glucose * 1000;
+        c->st.person.noise = 0;
+        logf_(c, "the person's glucose set to %u mg/dL", (unsigned)c->st.glucose);
+    }
     save(c);
 }
 

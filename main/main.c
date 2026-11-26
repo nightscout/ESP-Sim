@@ -79,8 +79,10 @@ static time_t build_time(void)
     return mktime(&tm);
 }
 
-/* Without a network the clock starts at 1970. Pick up from the last save
- * (losing only the time the board was off) until NTP sets it. */
+/* Without a network the clock starts at 1970. Pick up from the newest time
+ * saved (losing only the time the board was off) until NTP sets it. Never an
+ * older one: a clock that goes back puts the pump's history in the future,
+ * and an app then refuses the whole history. */
 static void set_clock(bool have_state)
 {
     struct timeval tv;
@@ -92,9 +94,26 @@ static void set_clock(bool have_state)
     if (have_state && restored.saved_ms / 1000 > t) {
         t = (time_t)(restored.saved_ms / 1000);
     }
+    int64_t saved;
+    if (store_load_clock(&saved) && saved > t) {
+        t = (time_t)saved;
+    }
     tv.tv_sec = t;
     tv.tv_usec = 0;
     settimeofday(&tv, NULL);
+    ESP_LOGW(TAG, "no network time yet: the clock picks up from its last save");
+}
+
+/* Saves the time every 5 minutes, for set_clock after a power cut. */
+static void clock_task(void *arg)
+{
+    for (;;) {
+        time_t now = time(NULL);
+        if (now > 1700000000) {
+            store_save_clock(now);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5 * 60 * 1000));
+    }
 }
 
 const dash_state_t *pod_state(void)
@@ -110,11 +129,13 @@ static void pod_task(void *arg)
 
 void app_main(void)
 {
+    remote_log_init();
     ESP_LOGW(TAG, "ESP-Sim DASH pod simulator. TEST EQUIPMENT: delivers nothing; never use for therapy.");
 
     store_init();
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    setenv("TZ", CONFIG_ESPSIM_TZ, 1);
+    char tz[64];
+    setenv("TZ", store_load_tz(tz) ? tz : CONFIG_ESPSIM_TZ, 1);
     tzset();
 
     bool have = store_load_state(&restored);
@@ -142,6 +163,7 @@ void app_main(void)
         ble_start(false, 0, NULL);
     }
     cgm_app_start();
+    xTaskCreatePinnedToCore(clock_task, "clock", 3072, NULL, 2, NULL, tskNO_AFFINITY);
     panel_start(&pod);
     if (!ypso) {
         xTaskCreatePinnedToCore(pod_task, "pod", 12288, NULL, 5, NULL, tskNO_AFFINITY);

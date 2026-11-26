@@ -382,7 +382,24 @@ static void test_ypso_clear(void)
     uint8_t sv_idx[8];
     safevar(sv_idx, 0);
     CHECK(ph_write(&ph, YC_EVENT_INDEX, sv_idx, 8) == YPSO_VALUE_INVALID);
-    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && n == 19 && v[4] == 2);
+    /* Newest first: the running temp basal's _RUNNING entry (9), 150 % for 30 min. */
+    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && n == 19 && v[4] == 9);
+    CHECK((v[5] | v[6] << 8) == 150 && (v[7] | v[8] << 8) == 30);
+    uint32_t tbr_t = le32(v), tbr_seq = le32(v + 11);
+    /* Then the bolus, finished in place: type 2, its own sequence the bolus status gave. */
+    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 2 && (v[5] | v[6] << 8) == 100);
+    uint8_t bs[16];
+    size_t bn;
+    CHECK(ph_read(&ph, YC_GET_BOLUS_STATUS, bs, &bn) == 0 && le32(bs + 9) == le32(v + 11));
+    /* Cancelled 5 minutes on: the same entry becomes TBR_ABORT (32), same sequence, same start stamp. */
+    run(&y, 300);
+    safevar(t, 100);
+    safevar(t + 8, 0);
+    CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == 0);
+    idx[0] = 0;
+    CHECK(ph_write(&ph, YC_EVENT_INDEX, idx, 2) == 0);
+    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 32 && le32(v + 11) == tbr_seq && le32(v) == tbr_t);
+    CHECK((v[5] | v[6] << 8) == 150 && (v[7] | v[8] << 8) == 5); /* ran 5 minutes */
 }
 
 /* Open: a phone with no credentials for this pump gets in (what rockit does
@@ -410,6 +427,31 @@ static void test_ypso_open(void)
     CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == YPSO_ATT_INSUFFICIENT_AUTHORIZATION);
     CHECK(ypso_on_write(&y, YC_AUTH_PASSWORD, wrong, 16) == 0);
     CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == YPSO_ATT_INSUFFICIENT_AUTHORIZATION);
+}
+
+/* The pump keeps the board's local time: a clock 10 days out is set back, as a
+ * date and a time change in its history; one already right is left alone. */
+static void test_ypso_clock(void)
+{
+    static ypso_t y;
+    ypso_state_t st;
+    ypso_state_fresh(&st, YPSO_FW_V65);
+    st.clock_offset = 10 * 86400 + 900;
+    ypso_init(&y, &st, &yio);
+    uint16_t before = y.st.n_events;
+    CHECK(ypso_clock_to_local(&y));
+    CHECK(y.st.clock_offset == 0);
+    CHECK(y.st.n_events == before + 2);
+    CHECK(y.st.events[before].type == 12 && y.st.events[before + 1].type == 13); /* date, then time */
+    /* Stamped on the clock as it was before the change. */
+    CHECK(y.st.events[before].t > (uint32_t)(clock_now + 3600 - 946684800 + 10 * 86400));
+    CHECK(!ypso_clock_to_local(&y));
+    /* A board clock step does not deliver days of basal. */
+    int32_t res = y.st.reservoir;
+    clock_now += 5 * 86400;
+    ypso_tick(&y);
+    CHECK(res - y.st.reservoir <= 1);
+    clock_now -= 5 * 86400;
 }
 
 /* ---- the key exchange ------------------------------------------- */
@@ -553,5 +595,6 @@ void test_ypso_all(void)
     test_ypso_encrypted();
     test_ypso_clear();
     test_ypso_open();
+    test_ypso_clock();
     test_ypso_key_exchange();
 }
