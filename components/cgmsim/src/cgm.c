@@ -33,6 +33,136 @@
 
 static const char ID_CHARS[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 
+/* Sine for the pattern generator, scaled by 10000, one degree per entry (361
+ * so 360 repeats 0). Integer-only: the host tests and the firmware link no
+ * libm. */
+static const int16_t SIN_TABLE[361] = {
+        0,   175,   349,   523,   698,   872,  1045,  1219,  1392,  1564,  1736,  1908,
+     2079,  2250,  2419,  2588,  2756,  2924,  3090,  3256,  3420,  3584,  3746,  3907,
+     4067,  4226,  4384,  4540,  4695,  4848,  5000,  5150,  5299,  5446,  5592,  5736,
+     5878,  6018,  6157,  6293,  6428,  6561,  6691,  6820,  6947,  7071,  7193,  7314,
+     7431,  7547,  7660,  7771,  7880,  7986,  8090,  8192,  8290,  8387,  8480,  8572,
+     8660,  8746,  8829,  8910,  8988,  9063,  9135,  9205,  9272,  9336,  9397,  9455,
+     9511,  9563,  9613,  9659,  9703,  9744,  9781,  9816,  9848,  9877,  9903,  9925,
+     9945,  9962,  9976,  9986,  9994,  9998, 10000,  9998,  9994,  9986,  9976,  9962,
+     9945,  9925,  9903,  9877,  9848,  9816,  9781,  9744,  9703,  9659,  9613,  9563,
+     9511,  9455,  9397,  9336,  9272,  9205,  9135,  9063,  8988,  8910,  8829,  8746,
+     8660,  8572,  8480,  8387,  8290,  8192,  8090,  7986,  7880,  7771,  7660,  7547,
+     7431,  7314,  7193,  7071,  6947,  6820,  6691,  6561,  6428,  6293,  6157,  6018,
+     5878,  5736,  5592,  5446,  5299,  5150,  5000,  4848,  4695,  4540,  4384,  4226,
+     4067,  3907,  3746,  3584,  3420,  3256,  3090,  2924,  2756,  2588,  2419,  2250,
+     2079,  1908,  1736,  1564,  1392,  1219,  1045,   872,   698,   523,   349,   175,
+        0,  -175,  -349,  -523,  -698,  -872, -1045, -1219, -1392, -1564, -1736, -1908,
+    -2079, -2250, -2419, -2588, -2756, -2924, -3090, -3256, -3420, -3584, -3746, -3907,
+    -4067, -4226, -4384, -4540, -4695, -4848, -5000, -5150, -5299, -5446, -5592, -5736,
+    -5878, -6018, -6157, -6293, -6428, -6561, -6691, -6820, -6947, -7071, -7193, -7314,
+    -7431, -7547, -7660, -7771, -7880, -7986, -8090, -8192, -8290, -8387, -8480, -8572,
+    -8660, -8746, -8829, -8910, -8988, -9063, -9135, -9205, -9272, -9336, -9397, -9455,
+    -9511, -9563, -9613, -9659, -9703, -9744, -9781, -9816, -9848, -9877, -9903, -9925,
+    -9945, -9962, -9976, -9986, -9994, -9998, -10000, -9998, -9994, -9986, -9976, -9962,
+    -9945, -9925, -9903, -9877, -9848, -9816, -9781, -9744, -9703, -9659, -9613, -9563,
+    -9511, -9455, -9397, -9336, -9272, -9205, -9135, -9063, -8988, -8910, -8829, -8746,
+    -8660, -8572, -8480, -8387, -8290, -8192, -8090, -7986, -7880, -7771, -7660, -7547,
+    -7431, -7314, -7193, -7071, -6947, -6820, -6691, -6561, -6428, -6293, -6157, -6018,
+    -5878, -5736, -5592, -5446, -5299, -5150, -5000, -4848, -4695, -4540, -4384, -4226,
+    -4067, -3907, -3746, -3584, -3420, -3256, -3090, -2924, -2756, -2588, -2419, -2250,
+    -2079, -1908, -1736, -1564, -1392, -1219, -1045,  -872,  -698,  -523,  -349,  -175,
+        0,
+};
+
+static uint16_t clamp_glucose(int32_t g)
+{
+    return (uint16_t)(g < 40 ? 40 : g > 400 ? 400 : g);
+}
+
+static int32_t sin_scaled(uint32_t phase_milli)
+{
+    uint32_t deg = (phase_milli / 1000) % 360;
+    uint32_t frac = phase_milli % 1000;
+    int32_t a = SIN_TABLE[deg], b = SIN_TABLE[deg + 1];
+    return a + (b - a) * (int32_t)frac / 1000;
+}
+
+/* A deterministic 32-bit mix. The walk has no RNG so that the same reading
+ * number always gives the same reading, before and after a reboot. */
+static uint32_t mix32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352dU;
+    x ^= x >> 15;
+    x *= 0x846ca68bU;
+    x ^= x >> 16;
+    return x;
+}
+
+const char *cgm_pattern_name(cgm_pattern_kind_t kind)
+{
+    return kind == CGM_PATTERN_SINE ? "sine"
+           : kind == CGM_PATTERN_WALK ? "walk"
+           : kind == CGM_PATTERN_PERSON ? "person"
+                                        : "fixed";
+}
+
+bool cgm_pattern_from_name(const char *name, cgm_pattern_kind_t *out)
+{
+    if (!name || !out) {
+        return false;
+    }
+    if (strcmp(name, "fixed") == 0) {
+        *out = CGM_PATTERN_FIXED;
+    } else if (strcmp(name, "person") == 0) {
+        *out = CGM_PATTERN_PERSON;
+    } else if (strcmp(name, "sine") == 0) {
+        *out = CGM_PATTERN_SINE;
+    } else if (strcmp(name, "walk") == 0) {
+        *out = CGM_PATTERN_WALK;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+cgm_next_reading_t cgm_pattern_next(const cgm_pattern_t *p, uint16_t previous, uint32_t reading_number)
+{
+    cgm_next_reading_t out = {.glucose = clamp_glucose(p->value), .trend = p->trend};
+    if (p->kind != CGM_PATTERN_SINE && p->kind != CGM_PATTERN_WALK) {
+        if (out.trend > 126) out.trend = 126;
+        if (out.trend < -127) out.trend = -127;
+        return out;
+    }
+    if (p->kind == CGM_PATTERN_SINE) {
+        uint32_t period = p->period_minutes ? p->period_minutes : 240;
+        uint64_t phase = (uint64_t)reading_number * CGM_READING_INTERVAL * 360000U / ((uint64_t)period * 60U);
+        int32_t wave = (int32_t)p->amplitude * sin_scaled((uint32_t)(phase % 360000U)) / 10000;
+        out.glucose = clamp_glucose((int32_t)p->value + wave);
+    } else {
+        uint16_t start = previous ? previous : 120;
+        if (reading_number == 0 || start == p->value) {
+            out.glucose = clamp_glucose(start);
+        } else {
+            int32_t diff = (int32_t)p->value - (int32_t)start;
+            uint32_t frac = 40 + mix32(reading_number * 2654435761U + (uint32_t)p->value * 977U) % 81;
+            int32_t step = (diff < 0 ? -diff : diff) * (int32_t)frac / 100;
+            if (step < 1) step = 1;
+            int32_t next = (int32_t)start + (diff > 0 ? step : -step);
+            if ((diff > 0 && next > p->value) || (diff < 0 && next < p->value)) {
+                next = p->value;
+            }
+            out.glucose = clamp_glucose(next);
+        }
+    }
+    /* The curves report the slope that actually occurred over the 5-minute
+     * reading interval, in tenths of a mg/dL per minute. The first reading has
+     * no previous reading, so it carries no trend. */
+    if (previous) {
+        int32_t tenths = ((int32_t)out.glucose - (int32_t)previous) * 2;
+        out.trend = (int8_t)(tenths > 126 ? 126 : tenths < -127 ? -127 : tenths);
+    } else {
+        out.trend = 0;
+    }
+    return out;
+}
+
 static void put16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)v;
@@ -155,6 +285,28 @@ void cgm_state_fresh(cgm_state_t *st, cgm_kind_t kind, const char *id, int64_t n
     st->isf = 45;
     st->icr = 10;
     st->basal_need = 80;
+    st->pattern = CGM_PATTERN_FIXED;
+    st->amplitude = 50;
+    st->period_minutes = 240;
+}
+
+void cgm_state_migrate(cgm_state_t *st)
+{
+    if (st->version == CGM_STATE_VERSION) {
+        return;
+    }
+    /* Version 1 had the person's MANUAL/PERSON pattern and no generator
+     * parameters. The patterns are numbered so the old values still mean the
+     * same thing (FIXED 0, PERSON 1), so only the new fields need defaults. */
+    if (st->version <= 1) {
+        if (st->amplitude == 0) {
+            st->amplitude = 50;
+        }
+        if (st->period_minutes == 0) {
+            st->period_minutes = 240;
+        }
+    }
+    st->version = CGM_STATE_VERSION;
 }
 
 uint8_t cgm_current_state(const cgm_state_t *st, int64_t now)
@@ -251,10 +403,37 @@ static void save(cgm_t *c)
     }
 }
 
-static void send(cgm_t *c, cgm_chr_t chr, const uint8_t *p, size_t n)
+/* The central's session, or NULL for a token that names no slot. */
+static cgm_session_state_t *session_at(cgm_t *c, cgm_session_t session)
 {
-    if (c->connected) {
-        c->io->send(c->io->ctx, chr, p, n);
+    return session < CGM_MAX_SESSIONS ? &c->sessions[session] : NULL;
+}
+
+static bool any_connected(const cgm_t *c)
+{
+    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+        if (c->sessions[i].connected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Forget every session's delivery history: a new sensor or a transmitter reset
+ * starts a fresh reading history, so no cursor can point into the old one. */
+static void clear_delivery_history(cgm_t *c)
+{
+    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+        c->sessions[i].delivered = 0;
+        c->sessions[i].prev_delivered = 0;
+    }
+}
+
+static void send(cgm_t *c, cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n)
+{
+    cgm_session_state_t *s = session_at(c, session);
+    if (s && s->connected) {
+        c->io->send(c->io->ctx, session, chr, p, n);
     }
 }
 
@@ -273,6 +452,8 @@ static const cgm_reading_t *latest(const cgm_t *c)
 {
     return c->st.n_hist ? &c->st.hist[c->st.n_hist - 1] : NULL;
 }
+
+static void push_glucose(cgm_t *c, cgm_session_t session);
 
 static void make_reading(cgm_t *c, uint32_t n, int64_t now)
 {
@@ -296,10 +477,31 @@ static void make_reading(cgm_t *c, uint32_t n, int64_t now)
             }
         }
         r.trend = (int8_t)(trend > 80 ? 80 : trend < -80 ? -80 : trend);
-    }
-    if (r.state == CGM_STATE_OK) {
-        r.glucose = st->glucose;
-        if (st->pattern == CGM_PATTERN_MANUAL) {
+        if (r.state == CGM_STATE_OK) {
+            r.glucose = st->glucose;
+        } else {
+            r.trend = NO_TREND;
+        }
+    } else if (r.state == CGM_STATE_OK) {
+        const cgm_reading_t *prev_r = latest(c);
+        /* 0 is the generator's "no previous reading" sentinel. A warm-up (or
+         * other error-state) entry has no glucose, so it must not seed a curve's
+         * trend or a walk's path. */
+        uint16_t prev = prev_r && prev_r->glucose ? prev_r->glucose : 0;
+        cgm_pattern_t p = {
+            .kind = (cgm_pattern_kind_t)st->pattern,
+            .value = st->glucose,
+            .trend = st->trend,
+            .amplitude = st->amplitude,
+            .period_minutes = st->period_minutes,
+        };
+        cgm_next_reading_t next = cgm_pattern_next(&p, prev, n);
+        r.glucose = next.glucose;
+        r.trend = next.trend;
+        /* A fixed pattern is the manual one: the panel's value is the next
+         * reading, and the reading after it moves by the trend. The curves keep
+         * `glucose` as their mean/target and derive every reading from n. */
+        if (st->pattern == CGM_PATTERN_FIXED) {
             int g = st->glucose + (st->trend * 5 + (st->trend >= 0 ? 5 : -5)) / 10;
             st->glucose = (uint16_t)(g < 40 ? 40 : g > 400 ? 400 : g);
         }
@@ -340,40 +542,85 @@ void cgm_tick(cgm_t *c)
         make_reading(c, n, now);
         st->next_n = n + 1;
         save(c);
+        /* A G7's window. A G6 never reads window_end, so writing it there is
+         * harmless. */
         c->window_end = now + WINDOW;
     }
     const cgm_reading_t *r = latest(c);
     bool undelivered = r && r->seq != st->delivered;
-    if (!c->connected) {
-        advertise(c, undelivered && !st->signal_loss && now < c->window_end);
-    } else if ((c->sent_glucose && now - c->last_activity >= IDLE_END) || now - c->connected_at >= CONN_MAX) {
-        logf_(c, "hanging up");
-        c->io->disconnect(c->io->ctx);
+    /* A connected central that asked for CONTROL notifications gets a reading it
+     * has not had, whether it was made this tick or it only subscribed after
+     * the reading was made. Authentication is not a reason to stop: the real
+     * app logs in and still expects a pushed reading every five minutes. */
+    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+        const cgm_session_state_t *s = &c->sessions[i];
+        if (s->connected && s->control_on) {
+            push_glucose(c, (cgm_session_t)i);
+        }
+    }
+    if (!any_connected(c)) {
+        /* A G6 transmitter advertises for as long as no central is connected.
+         * A G7 opens a window per reading and closes it. Signal loss silences
+         * both on purpose. */
+        bool want = st->kind == CGM_G6 || (undelivered && now < c->window_end);
+        advertise(c, want && !st->signal_loss);
+    }
+    /* A G7 collects one reading per link: once it has its reading and has gone
+     * quiet it is hung up on, and no G7 link outlives CONN_MAX. A G6 keeps the
+     * link it has and pushes every reading on it; signal loss and a new sensor
+     * end its sessions elsewhere. */
+    if (st->kind == CGM_G7) {
+        for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+            const cgm_session_state_t *s = &c->sessions[i];
+            if (!s->connected) {
+                continue;
+            }
+            if ((s->sent_glucose && now - s->last_activity >= IDLE_END) || now - s->connected_at >= CONN_MAX) {
+                logf_(c, "hanging up");
+                c->io->disconnect(c->io->ctx, (cgm_session_t)i);
+            }
+        }
     }
 }
 
-void cgm_on_connect(cgm_t *c)
+void cgm_on_connect(cgm_t *c, cgm_session_t session)
 {
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s) {
+        logf_(c, "ignoring connect for unknown session %u", (unsigned)session);
+        return;
+    }
     int64_t now = c->io->now(c->io->ctx);
-    c->connected = true;
+    /* A session is one connection, never one slot: a reconnect may be the same
+     * central with a rotated privacy address, so nothing may be inferred. The
+     * new connection starts with no conversation and no delivery history. */
+    memset(s, 0, sizeof *s);
+    s->connected = true;
     c->advertising = false; /* a connection ends the advertising */
-    c->sent_glucose = false;
-    c->authed = false;
-    c->auth_len = 0;
-    c->connected_at = c->last_activity = now;
-    c->prev_delivered = c->st.delivered;
+    s->connected_at = s->last_activity = now;
     logf_(c, "phone connected");
 }
 
-void cgm_on_disconnect(cgm_t *c)
+void cgm_on_disconnect(cgm_t *c, cgm_session_t session)
 {
-    c->connected = false;
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s) {
+        logf_(c, "ignoring disconnect for unknown session %u", (unsigned)session);
+        return;
+    }
+    s->connected = false;
+    s->control_on = false;
     logf_(c, "phone disconnected");
 }
 
-static void delivered(cgm_t *c, const cgm_reading_t *r)
+static void delivered(cgm_t *c, cgm_session_t session, const cgm_reading_t *r)
 {
-    c->sent_glucose = true;
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s) {
+        return;
+    }
+    s->sent_glucose = true;
+    s->delivered = r->seq;
     if (c->st.delivered != r->seq) {
         c->st.delivered = r->seq;
         save(c);
@@ -381,55 +628,32 @@ static void delivered(cgm_t *c, const cgm_reading_t *r)
 }
 
 /* Passive mode: what the phone would see the Dexcom app ask for. */
-static void push_glucose(cgm_t *c)
+static void push_glucose(cgm_t *c, cgm_session_t session)
 {
     const cgm_reading_t *r = latest(c);
-    if (!r || c->sent_glucose) {
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s || !s->connected || !r) {
         return;
+    }
+    if (s->sent_glucose && s->delivered == r->seq) {
+        return; /* this connection already has the current reading */
     }
     int64_t now = c->io->now(c->io->ctx);
     uint8_t m[19];
     if (c->st.kind == CGM_G7) {
-        send(c, CGM_CHR_CONTROL, m, cgm_g7_glucose_msg(&c->st, r, now, m));
+        send(c, session, CGM_CHR_CONTROL, m, cgm_g7_glucose_msg(&c->st, r, now, m));
     } else {
-        send(c, CGM_CHR_CONTROL, m, cgm_g6_time_msg(&c->st, now, m));
-        send(c, CGM_CHR_CONTROL, m, cgm_g6_glucose_msg(&c->st, r, 0x4f, m));
+        send(c, session, CGM_CHR_CONTROL, m, cgm_g6_time_msg(&c->st, now, m));
+        send(c, session, CGM_CHR_CONTROL, m, cgm_g6_glucose_msg(&c->st, r, 0x4f, m));
     }
-    delivered(c, r);
+    delivered(c, session, r);
 }
 
-/* The readings the phone missed, before the one it was just sent. */
-static void send_backfill(cgm_t *c)
+/* The G6 backfill frames for history indices [first, last], then the 0x51
+ * response that names the same times and buffer. */
+static void send_g6_backfill_range(cgm_t *c, cgm_session_t session, int first, int last, uint8_t id)
 {
-    const cgm_reading_t *r = latest(c);
-    if (!r || !c->sent_glucose) {
-        return;
-    }
     const cgm_state_t *st = &c->st;
-    int first = -1, last = -1;
-    for (int i = 0; i < st->n_hist - 1; i++) {
-        if (st->hist[i].seq > c->prev_delivered) {
-            if (first < 0) {
-                first = i;
-            }
-            last = i;
-        }
-    }
-    if (first < 0) {
-        return;
-    }
-    logf_(c, "backfilling %d readings", last - first + 1);
-    if (st->kind == CGM_G7) {
-        uint8_t rec[9];
-        for (int i = first; i <= last; i++) {
-            send(c, CGM_CHR_BACKFILL, rec, cgm_g7_backfill_record(st, &st->hist[i], rec));
-        }
-        static const uint8_t done[2] = {0x59, 0x00};
-        send(c, CGM_CHR_CONTROL, done, sizeof done);
-        return;
-    }
-    /* G6: a 4-byte header and 8-byte records, cut into 20-byte frames that
-     * start with their number and the backfill's id; then 0x51 on control. */
     uint8_t buf[4 + 8 * CGM_HISTORY] = {0};
     size_t n = 4;
     for (int i = first; i <= last; i++) {
@@ -447,22 +671,65 @@ static void send_backfill(cgm_t *c)
         size_t k = n - off < 18 ? n - off : 18;
         uint8_t *f = frames + total;
         f[0] = frame_no++;
-        f[1] = 0; /* the backfill's id */
+        f[1] = id;
         memcpy(f + 2, buf + off, k);
-        send(c, CGM_CHR_BACKFILL, f, k + 2);
+        send(c, session, CGM_CHR_BACKFILL, f, k + 2);
         total += k + 2;
     }
-    uint8_t m[20] = {0x51, 0x00, 0x01, 0x00};
+    uint8_t m[20] = {0x51, 0x00, 0x01, id};
     put32(m + 4, tx_time(st, st->hist[first].t));
     put32(m + 8, tx_time(st, st->hist[last].t));
     put32(m + 12, (uint32_t)total);
     put16(m + 16, cgm_crc16(frames, total));
-    send(c, CGM_CHR_CONTROL, m, with_crc(m, 18));
+    send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 18));
 }
 
-void cgm_on_subscribe(cgm_t *c, cgm_chr_t chr, bool on)
+/* The readings the session missed, before the one it was just sent. Its own
+ * backfill cursor (prev_delivered) keeps it to what this central has not had. */
+static void send_backfill(cgm_t *c, cgm_session_t session)
 {
-    c->last_activity = c->io->now(c->io->ctx);
+    cgm_session_state_t *s = session_at(c, session);
+    const cgm_reading_t *r = latest(c);
+    if (!s || !r || !s->sent_glucose) {
+        return;
+    }
+    const cgm_state_t *st = &c->st;
+    int first = -1, last = -1;
+    for (int i = 0; i < st->n_hist - 1; i++) {
+        if (st->hist[i].seq > s->prev_delivered) {
+            if (first < 0) {
+                first = i;
+            }
+            last = i;
+        }
+    }
+    if (first < 0) {
+        return;
+    }
+    logf_(c, "backfilling %d readings", last - first + 1);
+    if (st->kind == CGM_G7) {
+        uint8_t rec[9];
+        for (int i = first; i <= last; i++) {
+            send(c, session, CGM_CHR_BACKFILL, rec, cgm_g7_backfill_record(st, &st->hist[i], rec));
+        }
+        static const uint8_t done[2] = {0x59, 0x00};
+        send(c, session, CGM_CHR_CONTROL, done, sizeof done);
+        return;
+    }
+    send_g6_backfill_range(c, session, first, last, 0);
+}
+
+void cgm_on_subscribe(cgm_t *c, cgm_session_t session, cgm_chr_t chr, bool on)
+{
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s) {
+        logf_(c, "ignoring subscribe for unknown session %u", (unsigned)session);
+        return;
+    }
+    s->last_activity = c->io->now(c->io->ctx);
+    if (chr == CGM_CHR_CONTROL) {
+        s->control_on = on;
+    }
     if (!on) {
         return;
     }
@@ -470,46 +737,52 @@ void cgm_on_subscribe(cgm_t *c, cgm_chr_t chr, bool on)
     case CGM_CHR_AUTH: {
         /* What a phone sees once the Dexcom app has logged in, bonded. */
         static const uint8_t ok[3] = {0x05, 0x01, 0x01};
-        send(c, CGM_CHR_AUTH, ok, sizeof ok);
+        send(c, session, CGM_CHR_AUTH, ok, sizeof ok);
         break;
     }
     case CGM_CHR_CONTROL:
-        if (!c->authed) { /* active mode asks for each message itself */
-            push_glucose(c);
-        }
+        /* Sent below, once the CCCD is actually on and a notification can
+         * reach the app. */
         break;
     case CGM_CHR_BACKFILL:
-        send_backfill(c);
+        send_backfill(c, session);
         break;
     default:
         break;
     }
+    /* The app subscribes to CONTROL and only then waits for a reading: hand it
+     * the current one here, so a pairing flow does not sit until the next
+     * five-minute boundary. A repeat subscribe is a no-op: push_glucose knows
+     * this connection already has the reading. */
+    if (on && chr == CGM_CHR_CONTROL) {
+        push_glucose(c, session);
+    }
 }
 
-static void session_reply(cgm_t *c, uint8_t op, uint32_t requested, int64_t now)
+static void session_reply(cgm_t *c, cgm_session_t session, uint8_t op, uint32_t requested, int64_t now)
 {
     /* 27|29 status received requested(4) sessionStart(4) transmitterTime(4) crc */
     uint8_t m[17] = {op, 0x00, 0x01};
     put32(m + 3, requested);
     put32(m + 7, c->st.session_start ? tx_time(&c->st, c->st.session_start) : 0xffffffff);
     put32(m + 11, tx_time(&c->st, now));
-    send(c, CGM_CHR_CONTROL, m, with_crc(m, 15));
+    send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 15));
 }
 
-static void g6_control(cgm_t *c, const uint8_t *p, size_t n, int64_t now)
+static void g6_control(cgm_t *c, cgm_session_t session, const uint8_t *p, size_t n, int64_t now)
 {
     cgm_state_t *st = &c->st;
     uint8_t m[20];
     const cgm_reading_t *r = latest(c);
     switch (p[0]) {
     case 0x24: /* time */
-        send(c, CGM_CHR_CONTROL, m, cgm_g6_time_msg(st, now, m));
+        send(c, session, CGM_CHR_CONTROL, m, cgm_g6_time_msg(st, now, m));
         break;
     case 0x30: /* glucose */
     case 0x4e:
         if (r) {
-            send(c, CGM_CHR_CONTROL, m, cgm_g6_glucose_msg(st, r, p[0] == 0x30 ? 0x31 : 0x4f, m));
-            delivered(c, r);
+            send(c, session, CGM_CHR_CONTROL, m, cgm_g6_glucose_msg(st, r, p[0] == 0x30 ? 0x31 : 0x4f, m));
+            delivered(c, session, r);
         }
         break;
     case 0x32: { /* calibration data: 33 00 … glucose(2) at 11, timestamp(4) at 13 */
@@ -517,7 +790,7 @@ static void g6_control(cgm_t *c, const uint8_t *p, size_t n, int64_t now)
         memcpy(m, tmpl, 17);
         put16(m + 11, st->calibration);
         put32(m + 13, st->calibration ? tx_time(st, st->calibration_t) : 0);
-        send(c, CGM_CHR_CONTROL, m, with_crc(m, 17));
+        send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 17));
         break;
     }
     case 0x26: /* start sensor: startTime(4) secondsSince1970(4) */
@@ -528,7 +801,7 @@ static void g6_control(cgm_t *c, const uint8_t *p, size_t n, int64_t now)
             st->forced_state = 0;
             save(c);
             logf_(c, "sensor session started");
-            session_reply(c, 0x27, start, now);
+            session_reply(c, session, 0x27, start, now);
         }
         break;
     case 0x28: /* stop sensor: stopTime(4) */
@@ -536,7 +809,7 @@ static void g6_control(cgm_t *c, const uint8_t *p, size_t n, int64_t now)
             st->session_start = 0;
             save(c);
             logf_(c, "sensor session stopped");
-            session_reply(c, 0x29, get32(p + 1), now);
+            session_reply(c, session, 0x29, get32(p + 1), now);
         }
         break;
     case 0x34: /* calibrate: glucose(2) time(4) */
@@ -551,7 +824,7 @@ static void g6_control(cgm_t *c, const uint8_t *p, size_t n, int64_t now)
             m[0] = 0x35;
             m[1] = 0x00;
             m[2] = 0x00;
-            send(c, CGM_CHR_CONTROL, m, with_crc(m, 3));
+            send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 3));
         }
         break;
     case 0x42: /* reset */
@@ -560,53 +833,103 @@ static void g6_control(cgm_t *c, const uint8_t *p, size_t n, int64_t now)
         st->next_n = 0;
         st->n_hist = 0;
         st->delivered = 0;
+        clear_delivery_history(c);
         save(c);
         logf_(c, "transmitter reset");
         m[0] = 0x43;
         m[1] = 0x00;
-        send(c, CGM_CHR_CONTROL, m, with_crc(m, 2));
+        send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 2));
         break;
     case 0x4a: { /* version: firmware 1.6.5.25, expiry 112 days */
         static const uint8_t tmpl[17] = {0x4b, 0x00, 0x01, 0x06, 0x05, 0x19, 0xdf, 0x29, 0x00,
                                          0x00, 0x51, 0x00, 0x03, 0x70, 0x00, 0xf0, 0x00};
         memcpy(m, tmpl, 17);
-        send(c, CGM_CHR_CONTROL, m, with_crc(m, 17));
+        send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 17));
         break;
     }
-    case 0x09: /* disconnect */
-        c->io->disconnect(c->io->ctx);
+    case 0x50: { /* GlucoseBackfillTx: id at 3, start(4) at 4, end(4) at 8 */
+        uint8_t id = n >= 4 ? p[3] : 0;
+        uint32_t start = n >= 12 ? get32(p + 4) : 0;
+        uint32_t end = n >= 12 ? get32(p + 8) : 0xffffffffu;
+        int first = -1, last = -1;
+        for (int i = 0; i < st->n_hist; i++) {
+            uint32_t t = tx_time(st, st->hist[i].t);
+            if (t >= start && t <= end) {
+                if (first < 0) {
+                    first = i;
+                }
+                last = i;
+            }
+        }
+        logf_(c, "backfill requested by the app: %d readings", first < 0 ? 0 : last - first + 1);
+        if (first < 0) {
+            /* An empty answer still closes the request. */
+            memset(m, 0, sizeof m);
+            m[0] = 0x51;
+            m[1] = 0x00;
+            m[2] = 0x01;
+            m[3] = id;
+            put32(m + 4, start);
+            put32(m + 8, end);
+            send(c, session, CGM_CHR_CONTROL, m, with_crc(m, 18));
+            break;
+        }
+        send_g6_backfill_range(c, session, first, last, id);
         break;
+    }
+    case 0x09: { /* DisconnectTx: the app ends this session */
+        cgm_session_state_t *s = session_at(c, session);
+        /* An app that sends this before it has been given a reading is still
+         * pairing; dropping the link there puts it back into bonding forever.
+         * Keep the link until the app has a reading, then honour DisconnectTx:
+         * the radio drains any queued frame first, and a G6 advertises while
+         * unconnected, so the next reading is collected on a fresh session. */
+        if (!s || !s->sent_glucose) {
+            logf_(c, "g6 opcode 0x09 before a reading: keeping the link to finish pairing");
+            break;
+        }
+        logf_(c, "g6 opcode 0x09: app ended the session");
+        c->io->disconnect(c->io->ctx, session);
+        break;
+    }
     default:
         logf_(c, "ignoring control opcode 0x%02x", p[0]);
         break;
     }
 }
 
-void cgm_on_write(cgm_t *c, cgm_chr_t chr, const uint8_t *p, size_t n)
+void cgm_on_write(cgm_t *c, cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n)
 {
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s) {
+        logf_(c, "ignoring write for unknown session %u", (unsigned)session);
+        return;
+    }
     int64_t now = c->io->now(c->io->ctx);
-    c->last_activity = now;
+    s->last_activity = now;
     if (n == 0) {
         return;
     }
     if (chr == CGM_CHR_AUTH) {
         if (p[0] == 0x01 && n >= 9 && c->st.kind == CGM_G6) {
             /* AuthRequestTx: 01 token(8) 02. Answer 03 hash(token) challenge. */
-            c->auth_value[0] = 0x03;
-            cgm_g6_hash(c->st.id, p + 1, c->auth_value + 1);
-            dash_random(c->challenge, 8);
-            memcpy(c->auth_value + 9, c->challenge, 8);
-            c->auth_len = 17;
-        } else if (p[0] == 0x04 && n >= 9 && c->auth_len == 17) {
+            s->auth_value[0] = 0x03;
+            cgm_g6_hash(c->st.id, p + 1, s->auth_value + 1);
+            dash_random(s->challenge, 8);
+            memcpy(s->auth_value + 9, s->challenge, 8);
+            s->auth_len = 17;
+        } else if (p[0] == 0x04 && n >= 9 && s->auth_len == 17) {
             /* AuthChallengeTx: 04 hash(challenge). */
             uint8_t want[8];
-            cgm_g6_hash(c->st.id, c->challenge, want);
-            c->authed = memcmp(want, p + 1, 8) == 0;
-            c->auth_value[0] = 0x05;
-            c->auth_value[1] = c->authed ? 0x01 : 0x02;
-            c->auth_value[2] = c->authed ? 0x01 : 0x02; /* bonded: no Bluetooth pairing is asked for */
-            c->auth_len = 3;
-            logf_(c, "app %s the G6 login", c->authed ? "passed" : "failed");
+            cgm_g6_hash(c->st.id, s->challenge, want);
+            s->authed = memcmp(want, p + 1, 8) == 0;
+            s->auth_value[0] = 0x05;
+            s->auth_value[1] = s->authed ? 0x01 : 0x02;
+            s->auth_value[2] = s->authed ? 0x01 : 0x02; /* bonded: no Bluetooth pairing is asked for */
+            s->auth_len = 3;
+            logf_(c, "app %s the G6 login", s->authed ? "passed" : "failed");
+            /* No reading here: the app subscribes to CONTROL after the login,
+             * so the push belongs in cgm_on_subscribe. */
         }
         /* 06 keep-alive and 07 bond request need no answer. */
         return;
@@ -615,21 +938,25 @@ void cgm_on_write(cgm_t *c, cgm_chr_t chr, const uint8_t *p, size_t n)
         return;
     }
     if (c->st.kind == CGM_G6) {
-        g6_control(c, p, n, now);
+        g6_control(c, session, p, n, now);
     } else if (p[0] == 0x52) {
         /* Extended version, as a 10-day G7: session 10.5 days, warm-up 27 minutes. */
         static const uint8_t v[15] = {0x52, 0x00, 0xc0, 0xd7, 0x0d, 0x00, 0x54, 0x06,
                                       0x00, 0x02, 0x04, 0x04, 0xff, 0x0c, 0x00};
-        send(c, CGM_CHR_CONTROL, v, sizeof v);
+        send(c, session, CGM_CHR_CONTROL, v, sizeof v);
     }
 }
 
-size_t cgm_on_read(cgm_t *c, cgm_chr_t chr, uint8_t *out, size_t cap)
+size_t cgm_on_read(cgm_t *c, cgm_session_t session, cgm_chr_t chr, uint8_t *out, size_t cap)
 {
-    c->last_activity = c->io->now(c->io->ctx);
-    if (chr == CGM_CHR_AUTH && c->auth_len && c->auth_len <= cap) {
-        memcpy(out, c->auth_value, c->auth_len);
-        return c->auth_len;
+    cgm_session_state_t *s = session_at(c, session);
+    if (!s) {
+        return 0;
+    }
+    s->last_activity = c->io->now(c->io->ctx);
+    if (chr == CGM_CHR_AUTH && s->auth_len && s->auth_len <= cap) {
+        memcpy(out, s->auth_value, s->auth_len);
+        return s->auth_len;
     }
     return 0;
 }
@@ -638,6 +965,7 @@ size_t cgm_on_read(cgm_t *c, cgm_chr_t chr, uint8_t *out, size_t cap)
 
 void cgm_set_glucose(cgm_t *c, uint16_t glucose, int8_t trend)
 {
+    c->st.pattern = CGM_PATTERN_FIXED;
     c->st.glucose = glucose < 40 ? 40 : glucose > 400 ? 400 : glucose;
     c->st.trend = trend;
     save(c);
@@ -653,8 +981,12 @@ void cgm_set_signal_loss(cgm_t *c, bool on)
 {
     c->st.signal_loss = on;
     save(c);
-    if (on && c->connected) {
-        c->io->disconnect(c->io->ctx);
+    if (on) {
+        for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+            if (c->sessions[i].connected) {
+                c->io->disconnect(c->io->ctx, (cgm_session_t)i);
+            }
+        }
     }
 }
 
@@ -684,8 +1016,10 @@ void cgm_skip_warmup(cgm_t *c)
 
 void cgm_new_sensor(cgm_t *c, cgm_kind_t kind, const char *id)
 {
-    if (c->connected) {
-        c->io->disconnect(c->io->ctx);
+    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+        if (c->sessions[i].connected) {
+            c->io->disconnect(c->io->ctx, (cgm_session_t)i);
+        }
     }
     advertise(c, false);
     cgm_state_t fresh;
@@ -699,24 +1033,38 @@ void cgm_new_sensor(cgm_t *c, cgm_kind_t kind, const char *id)
     fresh.icr = c->st.icr;
     fresh.basal_need = c->st.basal_need;
     fresh.person = c->st.person;
+    fresh.amplitude = c->st.amplitude;
+    fresh.period_minutes = c->st.period_minutes;
     c->st = fresh;
+    clear_delivery_history(c);
     save(c);
     char name[16];
     cgm_name(&c->st, name);
     logf_(c, "new %s: %s", kind == CGM_G6 ? "G6 transmitter" : kind == CGM_G7 ? "G7 sensor" : "(off)", name);
 }
 
-void cgm_set_pattern(cgm_t *c, cgm_pattern_t pattern, cgm_insulin_t source, uint16_t isf, uint16_t icr,
-                     uint16_t basal_need)
+void cgm_set_pattern(cgm_t *c, const cgm_pattern_t *p)
 {
     cgm_state_t *st = &c->st;
-    bool start = pattern == CGM_PATTERN_PERSON &&
-                 (st->pattern != CGM_PATTERN_PERSON || st->person.minute == 0 || st->insulin_source != source);
+    st->pattern = p->kind == CGM_PATTERN_SINE ? CGM_PATTERN_SINE
+                  : p->kind == CGM_PATTERN_WALK ? CGM_PATTERN_WALK
+                                                 : CGM_PATTERN_FIXED;
+    st->glucose = p->value < 40 ? 40 : p->value > 400 ? 400 : p->value;
+    st->trend = p->trend;
+    st->amplitude = p->amplitude > 180 ? 180 : p->amplitude;
+    st->period_minutes = p->period_minutes < 10 ? 10 : p->period_minutes > 1440 ? 1440 : p->period_minutes;
+    save(c);
+}
+
+void cgm_set_person(cgm_t *c, cgm_insulin_t source, uint16_t isf, uint16_t icr, uint16_t basal_need)
+{
+    cgm_state_t *st = &c->st;
+    bool start = st->pattern != CGM_PATTERN_PERSON || st->person.minute == 0 || st->insulin_source != source;
     st->insulin_source = (uint8_t)source;
     st->isf = isf ? isf : st->isf ? st->isf : 45;
     st->icr = icr ? icr : st->icr ? st->icr : 10;
     st->basal_need = basal_need ? basal_need : st->basal_need ? st->basal_need : 80;
-    st->pattern = (uint8_t)pattern;
+    st->pattern = CGM_PATTERN_PERSON;
     if (start) {
         person_reset(c, c->io->now(c->io->ctx));
         logf_(c, "virtual person: %s insulin, ISF %u, ICR %u, basal %u.%02u U/h",
@@ -759,10 +1107,11 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
     int n = snprintf(out, cap,
                      "{\"kind\":%u,\"name\":\"%s\",\"id\":\"%s\",\"glucose\":%u,\"trend\":%d,\"state\":%u,"
                      "\"forcedState\":%u,\"signalLoss\":%s,\"activated\":%lld,\"sessionStart\":%lld,"
-                     "\"warmupDone\":%lld,\"connected\":%s,\"advertising\":%s,\"nextReading\":%lld",
+                     "\"warmupDone\":%lld,\"now\":%lld,\"connected\":%s,\"advertising\":%s,\"nextReading\":%lld",
                      st->kind, name, st->id, st->glucose, st->trend, cgm_current_state(st, now), st->forced_state,
                      st->signal_loss ? "true" : "false", (long long)st->activated, (long long)st->session_start,
-                     (long long)st->warmup_done, c->connected ? "true" : "false", c->advertising ? "true" : "false",
+                     (long long)st->warmup_done, (long long)now, any_connected(c) ? "true" : "false",
+                     c->advertising ? "true" : "false",
                      (long long)(st->activated + (int64_t)st->next_n * CGM_READING_INTERVAL));
     if (n < 0 || (size_t)n >= cap) {
         return 0;
@@ -773,10 +1122,12 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
     int64_t next_t = person ? person_next_meal(c, now, &next_g, &next_f) : 0;
     int64_t last_t = person ? person_last_meal(c, now, &last_g, &last_f) : 0;
     int k = snprintf(out + n, cap - n,
-                     ",\"pattern\":%u,\"insulinSource\":%u,\"isf\":%u,\"icr\":%u,\"basalNeed\":%u,"
+                     ",\"pattern\":\"%s\",\"amplitude\":%u,\"periodMinutes\":%u,"
+                     "\"insulinSource\":%u,\"isf\":%u,\"icr\":%u,\"basalNeed\":%u,"
                      "\"trueGlucose\":%d,\"iob\":%.2f,\"nextMeal\":%lld,\"nextMealGrams\":%u,\"nextFood\":\"%s\","
                      "\"lastMeal\":%lld,\"lastMealGrams\":%u,\"lastFood\":\"%s\"",
-                     st->pattern, st->insulin_source, st->isf, st->icr, st->basal_need,
+                     cgm_pattern_name((cgm_pattern_kind_t)st->pattern), st->amplitude, st->period_minutes,
+                     st->insulin_source, st->isf, st->icr, st->basal_need,
                      person ? cgm_person_glucose(c) : 0, person ? (double)person_insulin_acting(c) : 0.0,
                      (long long)next_t, next_g, next_t ? cgm_food_name(next_f) : "", (long long)last_t, last_g,
                      last_t ? cgm_food_name(last_f) : "");
@@ -784,9 +1135,14 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
         return 0;
     }
     n += k;
+    char tr[5] = "null";
+    if (r && r->trend != NO_TREND) {
+        snprintf(tr, sizeof tr, "%d", r->trend);
+    }
     int m = r ? snprintf(out + n, cap - n,
-                         ",\"last\":{\"seq\":%u,\"t\":%u,\"glucose\":%u,\"state\":%u,\"sent\":%s}}", (unsigned)r->seq,
-                         (unsigned)r->t, r->glucose, r->state, r->seq <= st->delivered ? "true" : "false")
+                         ",\"last\":{\"seq\":%u,\"t\":%u,\"glucose\":%u,\"state\":%u,\"trend\":%s,\"sent\":%s}}",
+                         (unsigned)r->seq, (unsigned)r->t, r->glucose, r->state, tr,
+                         r->seq <= st->delivered ? "true" : "false")
               : snprintf(out + n, cap - n, ",\"last\":null}");
     if (m < 0 || (size_t)(n + m) >= cap) {
         return 0;

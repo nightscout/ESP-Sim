@@ -1,4 +1,4 @@
-menu "ESP-Sim DASH pod"
+menu "ESP-Sim"
 
 config ESPSIM_TZ
     string "Time zone (POSIX TZ)"
@@ -14,5 +14,20 @@ config ESPSIM_AP_SSID_PREFIX
         With no Wi-Fi network saved, the board runs an access point named
         this plus the end of its MAC address. Its password is printed on the
         serial console at boot.
+
+choice ESPSIM_MEDTRUM_MODEL
+    prompt "Default Medtrum model"
+    default ESPSIM_MEDTRUM_200
+    help
+        The base serial a fresh Medtrum simulation starts with. The control
+        panel can pivot it later without a rebuild.
+
+config ESPSIM_MEDTRUM_200
+    bool "200U (serial 4A12D828)"
+
+config ESPSIM_MEDTRUM_300
+    bool "300U (serial 52DF1614)"
+
+endchoice
 
 endmenu

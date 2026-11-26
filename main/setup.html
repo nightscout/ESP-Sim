@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup | ESP-Sim</title>
+<style>
+  :root { color-scheme: dark; --bg:#14161a; --card:#1d2026; --line:#2b2f37; --fg:#e8eaed; --mut:#9aa0aa; --accent:#4f9cf8; --ok:#43c06d; --warn:#e0a53b; --bad:#e2574c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  .sheet { max-width:420px; margin:0 auto; padding:14px 14px 28px; }
+  .banner { display:flex; align-items:center; gap:10px; background:#232830; border:1px solid var(--line); border-radius:12px; padding:10px 12px; font-size:13px; color:var(--mut); margin-bottom:14px; }
+  .banner .board { margin-left:auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:0 0 12px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input[type=text], input[type=password] { width:100%; padding:10px; background:#14161a; border:1px solid var(--line); border-radius:8px; color:var(--fg); font-size:15px; }
+  button { width:100%; padding:11px; background:#2b2f37; color:var(--fg); border:1px solid var(--line); border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#0b0d10; font-weight:600; margin-top:14px; }
+  button.ghost { margin-top:10px; border-color:transparent; color:var(--mut); }
+  .muted { color:var(--mut); font-size:13px; margin-top:10px; }
+  .muted b { color:var(--fg); font-weight:600; }
+  footer { max-width:420px; margin:0 auto; padding:0 14px 24px; color:var(--mut); font-size:12px; }
+</style>
+</head>
+<body>
+<div class="sheet">
+<div class="banner">Wi-Fi setup <span class="board">ESP-Sim</span></div>
+<div class="card">
+  <h2>Connect a network</h2>
+  <p class="muted" style="margin:0 0 6px">You're already on the board's own network. Join a 2.4 GHz network and the board restarts on it: this sheet goes away and the control pages are served on that network. If the network or password is wrong, the board comes back as its own access point: reconnect and try again.</p>
+  <form id="join">
+    <label for="ssid">Network</label>
+    <input id="ssid" name="ssid" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="2.4 GHz network name">
+    <label for="pass">Password</label>
+    <input id="pass" name="password" type="password" autocomplete="off" placeholder="network password">
+    <button class="primary" type="submit">Join and restart</button>
+  </form>
+  <div class="muted" id="msg"></div>
+</div>
+<div class="card">
+  <h2>Or keep the board offline</h2>
+  <p class="muted" style="margin:0">The simulators work with no internet. Only the clock is unset, so the pod starts at its own uptime and a phone that checks it may show an odd date.</p>
+  <button class="ghost" id="skip" type="button">Continue without joining &rarr;</button>
+</div>
+</div>
+<footer>Test equipment only. Simulated data, no insulin.</footer>
+<script>
+  const msg = document.getElementById('msg');
+  document.getElementById('join').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ssid = document.getElementById('ssid').value.trim();
+    const password = document.getElementById('pass').value;
+    if (!ssid) { msg.textContent = 'Enter the network name.'; return; }
+    msg.textContent = 'Saving...';
+    try {
+      const r = await fetch('/setup/wifi', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ ssid, password }) });
+      msg.textContent = await r.text();
+    } catch (err) {
+      msg.textContent = 'Could not reach the board. Reconnect and try again.';
+    }
+  });
+  document.getElementById('skip').addEventListener('click', async () => {
+    try { await fetch('/setup/dismiss', { method:'POST' }); } catch (err) {}
+    location.href = '/';
+  });
+</script>
+</body>
+</html>

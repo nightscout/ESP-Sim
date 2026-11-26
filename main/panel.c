@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "app.h"
+#include "captive.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -22,9 +23,16 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "pages.h"
 
 static const char *TAG = "panel";
 static dash_pod_t *the_pod;
+/* The pump the running apps started as, read once at boot. The NVS value
+ * changes the moment the panel schedules a switch, a second before the board
+ * restarts, and the app for the new mode is not running yet: gating the
+ * per-pump routes on the NVS value would call into an app whose mutex is still
+ * NULL. */
+static uint8_t boot_pump;
 
 extern const char panel_html_start[] asm("_binary_panel_html_start");
 extern const char panel_html_end[] asm("_binary_panel_html_end");
@@ -33,9 +41,10 @@ extern const char panel_html_end[] asm("_binary_panel_html_end");
 
 static int sta_failures;
 static bool ap_started;
+static bool sta_joined;
 static bool sntp_started;
 
-static void ap_credentials(char ssid[33], char pass[17])
+void panel_ap_credentials(char ssid[33], char pass[17])
 {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
@@ -50,7 +59,7 @@ static void start_ap(void)
     }
     ap_started = true;
     char ssid[33], pass[17];
-    ap_credentials(ssid, pass);
+    panel_ap_credentials(ssid, pass);
     wifi_config_t ap = {0};
     memcpy(ap.ap.ssid, ssid, strlen(ssid));
     ap.ap.ssid_len = (uint8_t)strlen(ssid);
@@ -62,7 +71,9 @@ static void start_ap(void)
     esp_wifi_get_mode(&mode);
     esp_wifi_set_mode(mode == WIFI_MODE_STA ? WIFI_MODE_APSTA : WIFI_MODE_AP);
     esp_wifi_set_config(WIFI_IF_AP, &ap);
-    ESP_LOGW(TAG, "access point \"%s\", password \"%s\": control panel at http://192.168.4.1/", ssid, pass);
+    dns_start();
+    ESP_LOGW(TAG, "access point \"%s\", password \"%s\": control panel at http://192.168.4.1/, "
+                  "Wi-Fi setup at http://192.168.4.1/setup", ssid, pass);
 }
 
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -70,14 +81,21 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        sta_joined = false;
         if (++sta_failures == 5) {
             ESP_LOGW(TAG, "could not join the saved network: starting the access point too");
             start_ap();
         }
         esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STOP) {
+        if (ap_started) {
+            ap_started = false;
+            dns_stop();
+        }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = data;
         sta_failures = 0;
+        sta_joined = true;
         ESP_LOGW(TAG, "control panel at http://" IPSTR "/", IP2STR(&e->ip_info.ip));
         if (!sntp_started) {
             sntp_started = true;
@@ -112,6 +130,16 @@ static void wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
+bool panel_sta_joined(void)
+{
+    return sta_joined;
+}
+
+bool panel_ap_active(void)
+{
+    return ap_started;
+}
+
 /* ---- HTTP -------------------------------------------------------------------- */
 
 static esp_err_t send_status(httpd_req_t *req)
@@ -128,6 +156,11 @@ static esp_err_t send_status(httpd_req_t *req)
 
 static esp_err_t get_index(httpd_req_t *req)
 {
+    /* The exact "/" route wins before the catch-all, so the portal's AP-mode
+     * redirect has to happen here. */
+    if (captive_action(req, req->uri, "GET") == PORTAL_REDIRECT_SETUP) {
+        return captive_redirect_setup(req);
+    }
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, panel_html_start, panel_html_end - panel_html_start);
 }
@@ -165,9 +198,26 @@ static esp_err_t post_command(httpd_req_t *req)
     return send_status(req);
 }
 
-/* ---- the CGM: GET /cgm, POST /cgm {"command": ...} ---------------------------- */
+/* ---- the CGM: GET /cgm (the page), /cgm/status and /cgm/command ------------- */
 
-static esp_err_t send_cgm(httpd_req_t *req)
+/* The CGM page is the same single-page panel; its script shows only the CGM
+ * card when the path is /cgm. /g7 is the old URL: the page redirects, the API
+ * keeps the same handlers. */
+static esp_err_t get_cgm_page(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, panel_html_start, panel_html_end - panel_html_start);
+}
+
+static esp_err_t redirect_g7(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/cgm");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, "moved to /cgm\n", HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t send_cgm_status(httpd_req_t *req)
 {
     char json[1400];
     size_t n = cgm_app_status_json(json, sizeof json);
@@ -179,7 +229,7 @@ static esp_err_t send_cgm(httpd_req_t *req)
     return httpd_resp_send(req, json, (ssize_t)n);
 }
 
-static esp_err_t post_cgm(httpd_req_t *req)
+static esp_err_t post_cgm_command(httpd_req_t *req)
 {
     char body[256];
     if (read_body(req, body, sizeof body) < 0) {
@@ -191,7 +241,7 @@ static esp_err_t post_cgm(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
         return ESP_OK;
     }
-    return send_cgm(req);
+    return send_cgm_status(req);
 }
 
 /* ---- the YpsoPump: GET /ypso, POST /ypso {"command": ...} ----------------------- */
@@ -200,7 +250,7 @@ static esp_err_t send_ypso(httpd_req_t *req)
 {
     char json[900];
     size_t n;
-    if (store_load_pump() == 1) {
+    if (boot_pump == PUMP_YPSO) {
         n = ypso_app_status_json(json, sizeof json);
         if (n == 0 || n + 20 > sizeof json) {
             return httpd_resp_send_500(req);
@@ -216,17 +266,18 @@ static esp_err_t send_ypso(httpd_req_t *req)
 }
 
 static void restart(void *arg);
-static void restart_soon(void);
+void panel_restart_soon(void);
 
-static esp_err_t post_ypso(httpd_req_t *req)
+esp_err_t panel_post_ypso(httpd_req_t *req)
 {
     char body[256];
     if (read_body(req, body, sizeof body) < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request body");
         return ESP_OK;
     }
-    /* Switching the pump: {"command": "pumpSelect", "pump": 0 (pod) | 1 (YpsoPump),
-     * "podType": 0 | 1, "fw": 0-4, "fresh": true}. The board restarts. */
+    /* Switching the pump: {"command": "pumpSelect", "pump": 0 (pod) | 1 (YpsoPump)
+     * | 2 (Medtrum base), "podType": 0 | 1, "fw": 0-4, "fresh": true}. The
+     * board restarts. */
     if (strstr(body, "\"pumpSelect\"")) {
         long pump = -1, fw = -1, pod_type = -1, fresh = 0;
         const char *p;
@@ -240,8 +291,9 @@ static esp_err_t post_ypso(httpd_req_t *req)
             pod_type = strtol(strchr(p, ':') + 1, NULL, 10);
         }
         fresh = strstr(body, "\"fresh\":true") != NULL;
-        if (pump != 0 && pump != 1) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "pump is 0 (Omnipod pod) or 1 (YpsoPump)");
+        if (pump != 0 && pump != 1 && pump != 2) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "pump is 0 (Omnipod pod), 1 (YpsoPump) or 2 (Medtrum base)");
             return ESP_OK;
         }
         if (pump == 1) {
@@ -262,23 +314,26 @@ static esp_err_t post_ypso(httpd_req_t *req)
             st->fw = (uint8_t)fw;
             store_save_ypso(NULL, st);
             free(st);
+        } else if (pump == 2) {
+            /* The Medtrum base: nothing to prepare. medtrum_app_start() loads
+             * the saved base, or makes a fresh one, on the next boot. */
         } else if (pod_type == 0 || pod_type == 1) {
             char cmd[64];
             snprintf(cmd, sizeof cmd, "{\"command\":\"setPodType\",\"value\":%ld}", pod_type);
-            if (store_load_pump() == 1 || pod_type != the_pod->st.pod_type) {
+            if (boot_pump == PUMP_YPSO || pod_type != the_pod->st.pod_type) {
                 dash_pod_panel_command(the_pod, cmd, strlen(cmd));
             }
         }
         store_save_pump((uint8_t)pump);
         httpd_resp_sendstr(req, "{\"restarting\":true}");
-        restart_soon();
+        panel_restart_soon();
         return ESP_OK;
     }
     char *reply = malloc(4200);
     if (!reply) {
         return httpd_resp_send_500(req);
     }
-    const char *err = store_load_pump() == 1 ? ypso_app_command(body, reply, 4200) : "the board is not a YpsoPump";
+    const char *err = boot_pump == PUMP_YPSO ? ypso_app_command(body, reply, 4200) : "the board is not a YpsoPump";
     esp_err_t r;
     if (err) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
@@ -325,12 +380,54 @@ static bool json_string(const char *j, const char *key, char *out, size_t size)
     return *p == '"';
 }
 
+/* ---- the Medtrum base: GET /patch, POST /patch ------------------------------- */
+
+static esp_err_t send_patch(httpd_req_t *req)
+{
+    if (boot_pump != PUMP_MEDTRUM) {
+        return httpd_resp_send_404(req);
+    }
+    char json[512];
+    size_t n = medtrum_app_status_json(json, sizeof json);
+    if (n == 0) {
+        return httpd_resp_send_500(req);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, (ssize_t)n);
+}
+
+static esp_err_t post_patch(httpd_req_t *req)
+{
+    if (boot_pump != PUMP_MEDTRUM) {
+        return httpd_resp_send_404(req);
+    }
+    char body[256];
+    if (read_body(req, body, sizeof body) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad request body");
+        return ESP_OK;
+    }
+    /* The patch core has no crash hook, so the panel reboots the base itself:
+     * the phone loses its in-flight command and finds the base again. */
+    char cmd[32];
+    if (json_string(body, "command", cmd, sizeof cmd) && strcmp(cmd, "medtrumCrash") == 0) {
+        panel_restart_soon();
+        return send_patch(req);
+    }
+    const char *err = medtrum_app_command(body);
+    if (err) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+        return ESP_OK;
+    }
+    return send_patch(req);
+}
+
 static void restart(void *arg)
 {
     esp_restart();
 }
 
-static void restart_soon(void)
+void panel_restart_soon(void)
 {
     static esp_timer_handle_t t;
     const esp_timer_create_args_t args = {.callback = restart, .name = "restart"};
@@ -340,7 +437,7 @@ static void restart_soon(void)
     esp_timer_start_once(t, 1000 * 1000);
 }
 
-static esp_err_t post_wifi(httpd_req_t *req)
+static esp_err_t save_wifi(httpd_req_t *req, bool dismiss)
 {
     char body[256], ssid[33], pass[65];
     if (read_body(req, body, sizeof body) < 0 || !json_string(body, "ssid", ssid, sizeof ssid) ||
@@ -353,32 +450,60 @@ static esp_err_t post_wifi(httpd_req_t *req)
         return ESP_OK;
     }
     store_save_wifi(ssid, pass);
+    if (dismiss) {
+        captive_set_dismissed(req);
+    }
     httpd_resp_sendstr(req, "saved; restarting\n");
-    restart_soon();
+    panel_restart_soon();
     return ESP_OK;
+}
+
+esp_err_t panel_post_wifi(httpd_req_t *req)
+{
+    return save_wifi(req, false);
+}
+
+esp_err_t panel_post_setup_wifi(httpd_req_t *req)
+{
+    /* /setup/wifi also dismisses the sheet, but only once the body is valid. */
+    return save_wifi(req, true);
 }
 
 void panel_start(dash_pod_t *pod)
 {
     the_pod = pod;
+    boot_pump = store_load_pump();
     wifi_start();
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 12288; /* room for the larger handlers */
-    cfg.max_uri_handlers = 12;
+    /* 14 routes here, 6 settings, 3 pump and 4 captive (the last is the wildcard
+     * catch-all): 27, with headroom. */
+    cfg.max_uri_handlers = 32;
+    cfg.uri_match_fn = httpd_uri_match_wildcard; /* for the portal's catch-all */
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &cfg));
     const httpd_uri_t routes[] = {
         {.uri = "/", .method = HTTP_GET, .handler = get_index},
         {.uri = "/status", .method = HTTP_GET, .handler = send_status},
         {.uri = "/command", .method = HTTP_POST, .handler = post_command},
-        {.uri = "/wifi", .method = HTTP_POST, .handler = post_wifi},
-        {.uri = "/cgm", .method = HTTP_GET, .handler = send_cgm},
-        {.uri = "/cgm", .method = HTTP_POST, .handler = post_cgm},
+        {.uri = "/wifi", .method = HTTP_POST, .handler = panel_post_wifi},
+        {.uri = "/cgm", .method = HTTP_GET, .handler = get_cgm_page},
+        {.uri = "/g7", .method = HTTP_GET, .handler = redirect_g7},
+        {.uri = "/cgm/status", .method = HTTP_GET, .handler = send_cgm_status},
+        {.uri = "/g7/status", .method = HTTP_GET, .handler = send_cgm_status},
+        {.uri = "/cgm/command", .method = HTTP_POST, .handler = post_cgm_command},
+        {.uri = "/g7/command", .method = HTTP_POST, .handler = post_cgm_command},
         {.uri = "/ypso", .method = HTTP_GET, .handler = send_ypso},
-        {.uri = "/ypso", .method = HTTP_POST, .handler = post_ypso},
+        {.uri = "/ypso", .method = HTTP_POST, .handler = panel_post_ypso},
+        {.uri = "/patch", .method = HTTP_GET, .handler = send_patch},
+        {.uri = "/patch", .method = HTTP_POST, .handler = post_patch},
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; i++) {
         httpd_register_uri_handler(server, &routes[i]);
+    }
+    esp_err_t err = pages_register(server);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "registering the pages: %s", esp_err_to_name(err));
     }
 }

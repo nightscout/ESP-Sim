@@ -3,19 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP-Sim</title>
+<title>Home | ESP-Sim</title>
 <style>
   :root { color-scheme: dark; --bg:#14161a; --card:#1d2026; --line:#2b2f37; --fg:#e8eaed; --mut:#9aa0aa; --accent:#4f9cf8; --ok:#43c06d; --warn:#e0a53b; --bad:#e2574c; }
   * { box-sizing:border-box; }
   body { margin:0; font:15px/1.4 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
-  header { padding:16px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:4px 20px; align-items:baseline; }
-  header h1 { font-size:18px; margin:0; }
-  header .meta { color:var(--mut); font-size:13px; }
   main { max-width:760px; margin:0 auto; padding:16px; display:grid; gap:16px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
   .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 12px; }
   .big { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
   .big .val { font-size:44px; font-weight:600; }
+  .val.sm { font-size:22px; font-weight:600; }
+  .openLink { float:right; font-size:12px; text-transform:none; letter-spacing:0; font-weight:400; }
   .big .unit { color:var(--mut); }
   .chip { padding:3px 10px; border-radius:20px; font-size:13px; background:#2b2f37; }
   .big .chip { margin-left:auto; }
@@ -29,8 +28,6 @@
   input[type=number], input:not([type]), input[type=password], select { width:100%; padding:8px; background:#14161a; border:1px solid var(--line); border-radius:7px; color:var(--fg); font-size:15px; }
   .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
   .row > div { flex:1; min-width:140px; }
-  .checks { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:6px 16px; }
-  .checks label { display:flex; gap:8px; align-items:center; margin:0; font-size:14px; color:var(--fg); }
   .actions { margin-top:14px; display:flex; flex-wrap:wrap; align-items:center; gap:8px 12px; }
   button { padding:9px 14px; background:#2b2f37; color:var(--fg); border:1px solid var(--line); border-radius:7px; font-size:14px; cursor:pointer; }
   button:hover { border-color:var(--accent); }
@@ -42,217 +39,67 @@
   th { color:var(--mut); font-weight:500; }
   .muted { color:var(--mut); font-size:13px; }
   footer { max-width:760px; margin:0 auto; padding:4px 16px 24px; color:var(--mut); font-size:12px; }
+  nav { display:flex; flex-wrap:wrap; gap:2px 18px; align-items:baseline; padding:12px 16px; border-bottom:1px solid var(--line); max-width:760px; margin:0 auto; }
+  nav .brand { font-weight:600; margin-right:auto; }
+  nav a { color:var(--mut); text-decoration:none; font-size:14px; }
+  nav a:hover { color:var(--fg); }
+  nav a.active { color:var(--accent); }
+  .seg { display:flex; gap:8px; flex-wrap:wrap; }
+  .seg button { flex:1; min-width:130px; }
+  .seg button.active { background:var(--accent); border-color:var(--accent); color:#0b0d10; font-weight:600; }
+  .subbox { margin-top:14px; padding:12px; border:1px solid var(--line); border-radius:9px; }
+  .subbox h3 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 8px; }
+  [hidden] { display:none !important; }
+  body.cgm-page .page-home { display:none !important; }
+  body:not(.cgm-page) .page-cgm { display:none !important; }
 </style>
 </head>
 <body>
-<header>
-  <h1 id="title">DASH pod</h1>
-  <span class="meta" id="podid"></span>
-  <span class="chip" id="link" role="status">—</span>
-</header>
+<nav>
+  <span class="brand">ESP-Sim</span>
+  <a href="/" id="navHome">Home</a>
+  <a href="/cgm" id="navCgm">CGM</a>
+  <a href="/pump" id="navPump">Pump</a>
+  <a href="/settings" id="navSettings">Settings</a>
+  <a href="/setup" id="navSetup" hidden>Setup</a>
+</nav>
 <main>
-  <section class="card" aria-labelledby="h-status">
-    <h2 id="h-status">Pod</h2>
-    <div class="big">
-      <span class="val" id="reservoir">—</span>
-      <span class="unit" id="reservoirUnit">U in reservoir</span>
-      <span class="chip" id="progress">—</span>
+
+  <!-- home -->
+  <section class="card page-home" aria-labelledby="h-overview">
+    <h2 id="h-overview">Simulated</h2>
+    <div class="subbox">
+      <h3>Pump <a class="openLink" href="/pump">open page</a></h3>
+      <div class="big"><span class="val sm" id="ovPumpName">—</span><span class="chip" id="ovPumpState" role="status">—</span></div>
+      <dl>
+        <dt>Model</dt><dd id="ovPumpModel">—</dd>
+        <dt>Paired / base</dt><dd id="ovPumpPaired">—</dd>
+        <dt>Reservoir</dt><dd id="ovPumpRes">—</dd>
+        <dt>Status</dt><dd id="ovPumpNote">—</dd>
+      </dl>
     </div>
-    <dl>
-      <dt>Delivered</dt><dd id="delivered">—</dd>
-      <dt>Pod age</dt><dd id="age">—</dd>
-      <dt>Basal</dt><dd id="basal">—</dd>
-      <dt>Temp basal</dt><dd id="temp">—</dd>
-      <dt>Bolus</dt><dd id="bolus">—</dd>
-      <dt>Alerts</dt><dd id="alertsNow">—</dd>
-      <dt>Fault</dt><dd id="faultNow">—</dd>
+    <div class="subbox">
+      <h3>CGM <a class="openLink" href="/cgm">open page</a></h3>
+      <div class="big"><span class="val sm" id="ovCgmName">—</span><span class="chip" id="ovCgmState" role="status">—</span></div>
+      <dl>
+        <dt>Last reading</dt><dd id="ovCgmValue">—</dd>
+        <dt>Status</dt><dd id="ovCgmNote">—</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="card page-home" aria-labelledby="h-firmware">
+    <h2 id="h-firmware">Firmware</h2>
+    <dl style="margin-top:0">
+      <dt>Built</dt><dd id="fwBuilt">—</dd>
+      <dt>IDF</dt><dd><code id="fwIdf">—</code></dd>
+      <dt>Target</dt><dd><code id="fwTarget">—</code></dd>
+      <dt>App image</dt><dd id="fwSize">—</dd>
     </dl>
+    <div class="actions"><button class="primary" id="reboot">Reboot the board</button></div>
   </section>
 
-  <section class="card" aria-labelledby="h-res">
-    <h2 id="h-res">Reservoir</h2>
-    <div class="row">
-      <div><label for="resIn">Units in the reservoir (0–200)</label><input type="number" id="resIn" min="0" max="200" step="0.05"></div>
-      <div style="flex:0"><button class="primary" id="resSet">Set</button></div>
-    </div>
-    <div class="muted" style="margin-top:8px">The pod reports the level only below 50 U; above that it reports “50+ U”.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-age">
-    <h2 id="h-age">Pod age</h2>
-    <div class="row">
-      <div><label for="ageIn">Hours since activation</label><input type="number" id="ageIn" min="0" max="100" step="0.25"></div>
-      <div style="flex:0"><button class="primary" id="ageSet">Set</button></div>
-    </div>
-    <div class="actions">
-      <span class="muted">Jump to:</span>
-      <button data-hours="71.5">71.5 h</button>
-      <button data-hours="72">72 h (expires)</button>
-      <button data-hours="79">79 h</button>
-      <button data-hours="80">80 h (shuts down)</button>
-    </div>
-    <div class="muted" style="margin-top:8px">At 80 hours the pod faults with 0x1C at the next command.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-alerts">
-    <h2 id="h-alerts">Active alerts</h2>
-    <div class="checks" id="alertChecks"></div>
-    <div class="actions"><button class="primary" id="alertsSet">Set alerts</button></div>
-  </section>
-
-  <section class="card" aria-labelledby="h-fault">
-    <h2 id="h-fault">Fault</h2>
-    <label for="faultIn">Fault code</label>
-    <select id="faultIn"></select>
-    <div class="actions">
-      <button class="danger" id="faultSet">Trigger fault</button>
-      <button id="faultClear">Clear fault</button>
-    </div>
-  </section>
-
-  <section class="card" aria-labelledby="h-crash">
-    <h2 id="h-crash">Unacknowledged command</h2>
-    <div class="actions" style="margin-top:0">
-      <button class="danger" id="crashBefore">Crash before processing next command</button>
-      <button class="danger" id="crashAfter">Crash after processing next command</button>
-    </div>
-    <div class="muted" style="margin-top:8px" id="crashNote">The ESP32 reboots at the next command that changes delivery, leaving the phone without a response, then comes back as the same pod. Watch how the app recovers.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-type">
-    <h2 id="h-type">Pump</h2>
-    <div class="row">
-      <div><label for="typeIn">Simulate</label>
-        <select id="typeIn"><option value="0">Omnipod DASH</option><option value="1">Omnipod 5</option><option value="2">YpsoPump</option></select></div>
-      <div id="fwBox"><label for="fwIn">YpsoPump firmware</label><select id="fwIn">
-        <option value="0">V05.02.03: encrypted, Control 1.4 (the validated pump)</option>
-        <option value="1">V35.01.00: encrypted, study firmware (_alt characteristics)</option>
-        <option value="2">V65.00.06: OPN, clear text, Control 1.0</option>
-        <option value="3">V03.00.00: OPN, clear text, Control 1.1</option>
-        <option value="4">V02.00.00: baseline, no Control service</option>
-      </select></div>
-    </div>
-    <div class="actions"><button class="danger" id="typeSet">Switch</button>
-      <label style="display:flex;gap:8px;align-items:center;margin:0;font-size:14px;color:var(--fg)"><input type="checkbox" id="fwFresh"> as a new YpsoPump (new key, serial and history)</label></div>
-    <div class="muted" style="margin-top:8px">One pump at a time; the board restarts to switch. Switching between DASH and Omnipod 5 forgets the pod. Changing only the YpsoPump's firmware keeps the same pump (key, serial, history) unless "as a new YpsoPump" is ticked.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-ypso" id="ypsoCard" hidden>
-    <h2 id="h-ypso">YpsoPump</h2>
-    <div id="ypPassBox" hidden style="margin-bottom:12px;padding:12px;border-radius:10px;border:2px solid var(--accent, #2a6)">
-      <div class="muted">The phone is pairing: type this passkey on the phone</div>
-      <div style="font-size:40px;font-weight:700;letter-spacing:6px;font-variant-numeric:tabular-nums" id="ypPasskey">—</div>
-    </div>
-    <div class="big">
-      <span class="val" id="ypRes">—</span>
-      <span class="unit">U in reservoir</span>
-      <span class="chip" id="ypState">—</span>
-    </div>
-    <dl>
-      <dt>Pump</dt><dd id="ypName">—</dd>
-      <dt>Firmware</dt><dd id="ypFw">—</dd>
-      <dt>Phone</dt><dd id="ypLink">—</dd>
-      <dt>Basal now</dt><dd id="ypBasal">—</dd>
-      <dt>Temp basal</dt><dd id="ypTbr">—</dd>
-      <dt>Bolus</dt><dd id="ypBolus">—</dd>
-      <dt>Extended bolus</dt><dd id="ypExt">—</dd>
-      <dt>Counters</dt><dd id="ypCounters">—</dd>
-    </dl>
-    <div class="row">
-      <div><label for="ypResIn">Reservoir (U; blank: no cartridge)</label><input type="number" id="ypResIn" min="0" max="300" step="0.01"></div>
-      <div><label for="ypBatIn">Battery</label><select id="ypBatIn">
-        <option value="5">100 %</option><option value="4">80 %</option><option value="3">60 %</option><option value="2">40 %</option><option value="1">20 %</option><option value="0">0 % (empty)</option><option value="6">invalid</option></select></div>
-      <div style="flex:0"><button class="primary" id="ypSet">Set</button></div>
-    </div>
-    <div class="actions">
-      <button id="ypSuspend">Suspend</button>
-      <button id="ypReboot">Restart the pump (reboot counter +1)</button>
-      <button id="ypBonds">Forget Bluetooth bonds</button>
-    </div>
-    <label style="display:flex;gap:8px;align-items:flex-start;margin:12px 0 0;font-size:14px;color:var(--fg)"><input type="checkbox" id="ypOpen" style="margin-top:3px"> <span>Let any phone in without the pump's sign-in password, so an app that has none for it works at once (a real pump never does this). Untick to refuse a phone without the pump's own password, like a real pump.</span></label>
-    <div class="muted" style="margin-top:8px">The encrypted firmware (V05, V35) talks only under a session key that the phone and pump agree in the pump's key exchange, and the pump runs that exchange only for a server key it trusts. This simulated pump trusts its own, made at random on this board (no real pump's key); the panel does not hand it out, so a phone cannot run the key exchange with it yet. The clear-text firmware (V65, V03, V02) needs none of this. The pump pairs over Bluetooth by passkey: type the number shown at the top of this card.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-newpod">
-    <h2 id="h-newpod">New pod</h2>
-    <div class="actions" style="margin-top:0"><button class="danger" id="newPod">Forget this pod and start a new one</button></div>
-    <div class="muted" style="margin-top:8px">Clears pairing and delivery: the next phone pairs it as a fresh pod. Deactivating the pod from the app does the same.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-cgm">
-    <h2 id="h-cgm">CGM</h2>
-    <div class="big">
-      <span class="val" id="cgmGlucose">—</span>
-      <span class="unit">mg/dL last reading</span>
-      <span class="chip" id="cgmState">—</span>
-    </div>
-    <dl>
-      <dt>Device</dt><dd id="cgmDevice">—</dd>
-      <dt>Sensor age</dt><dd id="cgmAge">—</dd>
-      <dt>Last reading</dt><dd id="cgmLast">—</dd>
-      <dt>Next reading</dt><dd id="cgmNext">—</dd>
-      <dt>Bluetooth</dt><dd id="cgmLink">—</dd>
-    </dl>
-    <p class="muted" style="color:var(--bad)">Made-up readings. Use only a test phone that controls no real pump or pod: an app reading this sensor would dose insulin from these numbers.</p>
-    <div class="row">
-      <div><label for="cgmPatternIn">Glucose comes from</label>
-        <select id="cgmPatternIn"><option value="1">A virtual person (meals, insulin, exercise, drift)</option><option value="0">Manual: the value and trend below</option></select></div>
-      <div id="cgmSourceBox"><label for="cgmSourceIn">Their insulin</label>
-        <select id="cgmSourceIn"><option value="1">From the simulated pump (the AID's)</option><option value="0">Their own (basal and meal boluses)</option></select></div>
-    </div>
-    <div class="row" id="cgmPersonRow">
-      <div><label for="cgmIsfIn">ISF (mg/dL per U)</label><input type="number" id="cgmIsfIn" min="5" max="400" step="1"></div>
-      <div><label for="cgmIcrIn">Carb ratio (g per U)</label><input type="number" id="cgmIcrIn" min="1" max="100" step="1"></div>
-      <div><label for="cgmBasalIn">Basal need (U/h)</label><input type="number" id="cgmBasalIn" min="0.05" max="5" step="0.05"></div>
-      <div style="flex:0"><button class="primary" id="cgmPatternSet">Apply</button></div>
-    </div>
-    <div id="cgmPersonInfo" class="muted" style="margin-top:8px"></div>
-    <div class="actions" id="cgmPersonActions">
-      <button id="cgmSnack">Snack now (20 g)</button>
-      <button id="cgmExercise">Exercise now (45 min)</button>
-    </div>
-    <div class="row" id="cgmManualRow">
-      <div><label for="cgmGlucoseIn">Glucose (40–400 mg/dL)</label><input type="number" id="cgmGlucoseIn" min="40" max="400" step="1"></div>
-      <div><label for="cgmTrendIn">Trend (mg/dL per minute, −5 to 5)</label><input type="number" id="cgmTrendIn" min="-5" max="5" step="0.1"></div>
-      <div style="flex:0"><button class="primary" id="cgmGlucoseSet">Set</button></div>
-    </div>
-    <div class="muted" style="margin-top:8px">A reading every 5 minutes. The virtual person eats on their own (breakfast, lunch, dinner, snacks, from a list of foods), treats their own lows, sometimes exercises; their glucose follows the insulin they get. "From the simulated pump" means only what the pod or YpsoPump delivers: the AID's decisions show in the glucose (the pod counts its boluses and its running basal; its temp basals are not modelled yet). A toy model for testing software, not a physiological simulator.</div>
-    <div class="row" style="margin-top:6px">
-      <div><label for="cgmStateIn">Sensor state</label>
-        <select id="cgmStateIn">
-          <option value="0">Automatic (warm-up, then OK, then expired)</option>
-          <option value="2">Warm-up (2)</option>
-          <option value="6">OK (6)</option>
-          <option value="1">Stopped (1)</option>
-          <option value="16">G6: session failed (16)</option>
-          <option value="18">G7: temporary sensor issue (18)</option>
-          <option value="25">G7: sensor failed (25)</option>
-          <option value="24">G7: expired (24)</option>
-        </select></div>
-      <div style="flex:0"><button id="cgmStateSet">Set state</button></div>
-    </div>
-    <div class="actions">
-      <button id="cgmSkip">Skip warm-up</button>
-      <label style="display:flex;gap:8px;align-items:center;margin:0;font-size:14px;color:var(--fg)"><input type="checkbox" id="cgmLoss"> Signal loss (readings missed, backfilled later)</label>
-    </div>
-    <div class="row" style="margin-top:6px">
-      <div><label for="cgmKindIn">Simulate</label>
-        <select id="cgmKindIn"><option value="0">No CGM</option><option value="6">Dexcom G6</option><option value="7">Dexcom G7</option></select></div>
-      <div><label for="cgmIdIn">G6 transmitter ID (blank: random)</label><input id="cgmIdIn" maxlength="6" autocomplete="off" placeholder="81AB7Q"></div>
-      <div style="flex:0"><button class="danger" id="cgmNew">Start a new sensor</button></div>
-    </div>
-    <div class="muted" style="margin-top:8px">G6: enter the transmitter ID in the app. G7: the app finds the sensor (DXCM…) by itself. Both are found alongside the pod.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-wifi">
-    <h2 id="h-wifi">Wi-Fi</h2>
-    <label for="wifiSsid">Network name</label> <input id="wifiSsid" autocomplete="off">
-    <label for="wifiPass">Password</label> <input id="wifiPass" type="password" autocomplete="off">
-    <div class="actions"><button id="wifiSet">Join and restart</button><button id="wifiForget">Forget network</button></div>
-    <div class="muted" style="margin-top:8px">Joining a network gives the pod the right time and puts this panel on your LAN; the board prints its address on the serial console. Without one it runs its own access point.</div>
-  </section>
-
-  <section class="card" aria-labelledby="h-comms">
+  <section class="card page-home" aria-labelledby="h-comms" id="commsCard">
     <h2 id="h-comms">Comms</h2>
     <table><tbody>
       <tr><th scope="row">Message sequence</th><td id="msgSeq">—</td></tr>
@@ -261,342 +108,347 @@
       <tr><th scope="row">EAP-AKA sequence</th><td id="eapSeq">—</td></tr>
       <tr><th scope="row">Last programming sequence</th><td id="progSeq">—</td></tr>
     </tbody></table>
+    <div class="muted" style="margin-top:8px">The sequence counters of the simulated pod. Only a pod reports these: the YpsoPump shows its own counters on the Pump page, and the Medtrum base has none.</div>
   </section>
-  <div class="muted" id="msg" role="status" aria-live="polite"></div>
+
+  <!-- /cgm -->
+  <section class="card page-cgm" aria-labelledby="h-cgm-sim">
+    <h2 id="h-cgm-sim">Simulate</h2>
+    <div class="seg" id="cgmSel">
+      <button type="button" data-kind="0">No CGM</button>
+      <button type="button" data-kind="6">Dexcom G6</button>
+      <button type="button" data-kind="7">Dexcom G7</button>
+    </div>
+    <div class="muted" style="margin-top:10px">One sensor at a time; starting one replaces the current sensor. Made-up readings: use only a test phone that controls no real pump or pod.</div>
+  </section>
+
+  <section class="card page-cgm" aria-labelledby="h-cgm-sensor" id="cgmSensorBox">
+    <h2 id="h-cgm-sensor">Sensor <span class="chip" id="cgmState">—</span></h2>
+    <div class="big">
+      <span class="val" id="cgmGlucose">—</span>
+      <span class="unit">mg/dL last reading</span>
+    </div>
+    <dl>
+      <dt>Device</dt><dd id="cgmDevice">—</dd>
+      <dt>Sensor age</dt><dd id="cgmAge">—</dd>
+      <dt>Last reading</dt><dd id="cgmLast">—</dd>
+      <dt>Next reading</dt><dd id="cgmNext">—</dd>
+      <dt>Bluetooth</dt><dd id="cgmLink">—</dd>
+    </dl>
+
+    <div class="subbox" id="g6Box" hidden>
+      <h3>G6 transmitter</h3>
+      <div class="row">
+        <div><label for="g6Id">Pairing code (transmitter ID, blank: random)</label><input id="g6Id" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="81AB7Q"></div>
+        <div style="flex:0"><button class="primary" id="g6New">Start a new G6 transmitter</button></div>
+      </div>
+      <div class="muted" style="margin-top:8px">Enter this code in the app: the G6 is found by its transmitter ID. A new code pairs a fresh transmitter.</div>
+    </div>
+
+    <div class="subbox" id="g7Box" hidden>
+      <h3>G7 sensor</h3>
+      <div class="row">
+        <div><label>Pairing</label><div class="muted" id="g7Pair" style="font-size:14px;color:var(--fg)">—</div></div>
+        <div style="flex:0"><button class="primary" id="g7New">Start a new G7 sensor</button></div>
+      </div>
+      <div class="muted" style="margin-top:8px">The G7 carries its pairing code in the advertisement; the app finds it (DXCM…) by itself, no code to type. Starting a new sensor makes a new one with a new code.</div>
+    </div>
+
+    <div class="subbox">
+      <h3>Sensor state</h3>
+      <div class="row">
+        <div><label for="cgmStateIn">State</label>
+          <select id="cgmStateIn">
+            <option value="0">Automatic (warm-up, then OK, then expired)</option>
+            <option value="2">Warm-up (2)</option>
+            <option value="6">OK (6)</option>
+            <option value="1">Stopped (1)</option>
+            <option value="16">G6: session failed (16)</option>
+            <option value="18">G7: temporary sensor issue (18)</option>
+            <option value="25">G7: sensor failed (25)</option>
+            <option value="24">G7: expired (24)</option>
+          </select></div>
+        <div style="flex:0"><button id="cgmStateSet">Set state</button></div>
+      </div>
+      <div class="actions">
+        <button id="cgmSkip">Skip warm-up</button>
+        <label style="display:flex;gap:8px;align-items:center;margin:0;font-size:14px;color:var(--fg)"><input type="checkbox" id="cgmLoss"> Signal loss (readings missed, backfilled later)</label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card page-cgm" aria-labelledby="h-cgm-source" id="cgmSourceCard">
+    <h2 id="h-cgm-source">How glucose is simulated</h2>
+    <div class="seg" id="cgmModeSel">
+      <button type="button" data-mode="person">Virtual person</button>
+      <button type="button" data-mode="fixed">Fixed</button>
+      <button type="button" data-mode="sine">Wave</button>
+      <button type="button" data-mode="walk">Walk</button>
+    </div>
+
+    <div class="subbox" id="modePerson" hidden>
+      <h3>Virtual person</h3>
+      <div class="row">
+        <div><label for="cgmSourceIn">Their insulin</label>
+          <select id="cgmSourceIn"><option value="1">From the simulated pump (the AID's)</option><option value="0">Their own (basal and meal boluses)</option></select></div>
+        <div><label for="cgmIsfIn">ISF (mg/dL per U)</label><input type="number" id="cgmIsfIn" min="5" max="400" step="1"></div>
+        <div><label for="cgmIcrIn">Carb ratio (g per U)</label><input type="number" id="cgmIcrIn" min="1" max="100" step="1"></div>
+        <div><label for="cgmBasalIn">Basal need (U/h)</label><input type="number" id="cgmBasalIn" min="0.05" max="5" step="0.05"></div>
+        <div style="flex:0"><button class="primary" id="cgmPersonSet">Apply</button></div>
+      </div>
+      <div class="actions">
+        <button id="cgmSnack">Snack now (20 g)</button>
+        <button id="cgmExercise">Exercise now (45 min)</button>
+      </div>
+      <div id="cgmPersonInfo" class="muted" style="margin-top:8px"></div>
+      <div class="muted" style="margin-top:8px">The virtual person eats on their own (breakfast, lunch, dinner, snacks from a list of foods), treats their own lows and sometimes exercises; their glucose follows the insulin they get. “From the simulated pump” means only what the pod, YpsoPump or patch delivers, so the AID's decisions show in the glucose. A toy model for testing software, not a physiological simulator.</div>
+    </div>
+
+    <div class="subbox" id="modeFixed" hidden>
+      <h3>Fixed</h3>
+      <div class="row">
+        <div><label for="cgmGlucoseIn">Value (40–400 mg/dL)</label><input type="number" id="cgmGlucoseIn" min="40" max="400" step="1"></div>
+        <div><label for="cgmTrendIn">Trend (mg/dL per minute, −5 to 5)</label><input type="number" id="cgmTrendIn" min="-5" max="5" step="0.1"></div>
+        <div style="flex:0"><button class="primary" id="cgmFixedSet">Apply</button></div>
+      </div>
+      <div class="muted" style="margin-top:8px">One value with a trend; every reading repeats it. The glucose the app sees is this value.</div>
+    </div>
+
+    <div class="subbox" id="modeSine" hidden>
+      <h3>Wave</h3>
+      <div class="row">
+        <div><label for="cgmMeanIn">Mean (40–400 mg/dL)</label><input type="number" id="cgmMeanIn" min="40" max="400" step="1"></div>
+        <div><label for="cgmAmplitudeIn">Amplitude (± mg/dL)</label><input type="number" id="cgmAmplitudeIn" min="0" max="180" step="1" value="50"></div>
+        <div><label for="cgmPeriodIn">Period (minutes)</label><input type="number" id="cgmPeriodIn" min="10" max="1440" step="1" value="240"></div>
+        <div style="flex:0"><button class="primary" id="cgmSineSet">Apply</button></div>
+      </div>
+      <div class="muted" style="margin-top:8px">A sine around the mean, clamped to 40–400 mg/dL. The trend comes from the reading itself.</div>
+    </div>
+
+    <div class="subbox" id="modeWalk" hidden>
+      <h3>Walk</h3>
+      <div class="row">
+        <div><label for="cgmWalkIn">Target (40–400 mg/dL)</label><input type="number" id="cgmWalkIn" min="40" max="400" step="1"></div>
+        <div style="flex:0"><button class="primary" id="cgmWalkSet">Apply</button></div>
+      </div>
+      <div class="muted" style="margin-top:8px">Each reading steps toward the target, so the app sees a slow approach and then a flat line at it.</div>
+    </div>
+
+    <div class="muted" style="margin-top:12px">A reading every 5 minutes.</div>
+  </section>
+
+  <div class="muted page-home" id="msg" role="status" aria-live="polite"></div>
+  <div class="muted page-cgm" id="cmsg" role="status" aria-live="polite"></div>
 </main>
-<footer>For development use only — not an Insulet product. This pod simulates delivery and the CGM makes up its readings; never use either for therapy.</footer>
+<footer>For development use only — not an Insulet product. The pumps simulate delivery and the CGM makes up its readings; never use either for therapy.</footer>
 <script>
-const ALERTS = ["Auto-off","Unused","Shutdown imminent","Expiration reminder","Low reservoir","Suspended reminder","Suspend expired","Lifecycle"];
-const FAULTS = [
-  [1,"Flash erase failed"],
-  [2,"Flash store failed"],
-  [3,"Basal subcommand table corruption"],
-  [5,"Basal step corruption"],
-  [6,"RTC interrupt or pump encoder table corruption"],
-  [7,"Wire overdriven timeout"],
-  [8,"Invalid beep value"],
-  [9,"Invalid beep repeat pattern value"],
-  [10,"Temp basal step corruption"],
-  [11,"Temp basal subcommand table corruption"],
-  [13,"Reset due to COP"],
-  [14,"Reset due to illegal opcode"],
-  [15,"Reset due to illegal address"],
-  [16,"Reset due to SAWCOP Safety check"],
-  [17,"Bolus step corruption"],
-  [18,"Reset due to Low Voltage Detect"],
-  [19,"Message length too long"],
-  [20,"Occluded Reported as \"Occlusion detected\""],
-  [21,"Bolus program corruption"],
-  [22,"Bolus log corruption Safety check"],
-  [23,"Corruption in a validated table"],
-  [24,"Reservoir empty or exceeded maximum pulse delivery Reported as \"Empty reservoir\""],
-  [25,"Load error before starting pulse"],
-  [26,"Power Switch Array problem before starting pulse"],
-  [27,"Tick count unexpectedly not zero when starting pulse"],
-  [28,"Exceeded maximum Pod life of 80 hours Reported as \"Pod expired\""],
-  [29,"Commissioned bit unexpectedly not set"],
-  [30,"Unexpected commissioned state upon reset"],
-  [31,"Alerts table corruption"],
-  [32,"Validate encoder count error when bolusing"],
-  [33,"Bad timer variable state"],
-  [34,"Unexpected RTC Modulo Register value during reset"],
-  [35,"Calibrate timer problem"],
-  [37,"Tick interrupt handler unexpectedly called"],
-  [39,"Failed to set up alerts for tank fill operation"],
-  [40,"Bad arg or state"],
-  [41,"Alert #0 auto-off timeout Auto-off"],
-  [42,"Alert #1 auto-off timeout Not used"],
-  [43,"Alert #2 auto-off timeout Not used"],
-  [44,"Alert #3 auto-off timeout Not used"],
-  [45,"Alert #4 auto-off timeout Not used"],
-  [46,"Alert #5 auto-off timeout Not used"],
-  [47,"Alert #6 auto-off timeout Not used"],
-  [48,"Alert #7 auto-off timeout Not used"],
-  [49,"Incorrect pod state for command"],
-  [50,"Bad COP value during startup testing"],
-  [51,"Multi Command Timeout Fault"],
-  [52,"Reset from unknown cause More likely on third day of use due to low batteries and/or static electricity"],
-  [53,"SAW Veto Status unexpectedly not set"],
-  [54,"External pin reset with incorrect pod progress"],
-  [55,"Bad beep pattern state variable"],
-  [56,"Unexpected wire state"],
-  [57,"Bad variable value for LOAD1/LOAD2 test"],
-  [58,"Invalid value in message processing"],
-  [59,"SAW reset testing failure"],
-  [60,"MCP COP testing failure"],
-  [61,"Problem with step sensor pump anchor"],
-  [62,"Flash initialization or write error"],
-  [64,"Encoder open count too high Probable pump issue"],
-  [65,"Encoder count excessive variance"],
-  [66,"Encoder count too low Safety check"],
-  [67,"Encoder count problem"],
-  [68,"Open load wire 1 detected Software or hardware failure in Pod"],
-  [69,"Open load wire 2 detected Software or hardware failure in Pod"],
-  [70,"Problem with Power Switch Array Status and Control Register values"],
-  [71,"Problem with SAW VETO"],
-  [72,"Bad timer calibration"],
-  [73,"Bad timer high value"],
-  [74,"Bad timer period value"],
-  [75,"Bad ICS trim value"],
-  [76,"Unable to trim ICS correctly"],
-  [77,"Bad timer calibration mode"],
-  [78,"SAW trim error Safety check"],
-  [79,"Unexpected RF transmission error set during reset"],
-  [80,"Timer Pulse-width Modulator 2 overflow Static electricity"],
-  [81,"Bad state before starting pump"],
-  [82,"Out of Lock Status Latch"],
-  [83,"Wrong Rx sensitively value"],
-  [84,"Packet frame length too long"],
-  [85,"Unexpected IRQ high"],
-  [86,"Unexpected IRQ low"],
-  [87,"Pump check table corrupt"],
-  [88,"Bad pump check table parameters"],
-  [89,"Error updating pump check table"],
-  [90,"Pump check table values too high"],
-  [91,"Pump check table corruption"],
-  [92,"Prime open count too low Problem with a safety check after priming"],
-  [93,"Bad RF Carrier Detect Threshold"],
-  [94,"Write flash byte to disable flash security failed"],
-  [95,"Both wire 1 and wire 2 open before starting pump"],
-  [96,"Timed pump check startup problem 1 Possible pump issue/occlusion"],
-  [97,"Timed pump check startup problem 2 Possible pump issue/occlusion"],
-  [98,"Timed pump check excess timeouts 1 Possible pump issue/occlusion"],
-  [102,"Timed pump check excess timeouts 2 Possible pump issue/occlusion"],
-  [103,"Timed pump check excess timeouts 3 Possible pump issue/occlusion"],
-  [104,"Timed pump check pulse issue Possible pump issue/occlusion"],
-  [105,"Timed pump check bolus problem Possible pump issue/occlusion"],
-  [106,"Timed pump check above threshold Possible pump issue/occlusion"],
-  [128,"Basal under infusion"],
-  [129,"Basal over infusion"],
-  [130,"Temp basal under infusion"],
-  [131,"Temp basal over infusion"],
-  [132,"Bolus under infusion"],
-  [133,"Bolus over infusion"],
-  [134,"Basal over infusion pulse"],
-  [135,"Temp basal over infusion pulse"],
-  [136,"Bolus over infusion pulse"],
-  [137,"Immediate bolus under infusion pulse"],
-  [138,"Extended bolus over infusion pulse"],
-  [139,"Insulin schedule table corruption"],
-  [141,"Bad pulse type parameter"],
-  [142,"Sync request with no active temp basal"],
-  [143,"Insulin command parse unexpectedly failed"],
-  [144,"Bad Insulin Schedule Table selection parameter"],
-  [145,"Basal pulse request with no active basal insulin schedule"],
-  [146,"Temp basal pulse request with no active temp basal insulin schedule"],
-  [147,"Bolus pulse request with with no active bolus insulin schedule"],
-  [149,"Bad insulin command table specification"],
-  [150,"Bolus termination with incorrect values"],
-  [151,"Bad open transitions pod progress or count"]
-];
 const $ = id=>document.getElementById(id);
-const hex = n=>'0x'+n.toString(16).toUpperCase().padStart(2,'0');
-const units = u=>(Math.round(u*100)/100)+' U';
-const time = iso=>new Date(iso).toLocaleTimeString([], {timeStyle:'short'});
-const faultName = c=>{ const f=FAULTS.find(f=>f[0]===c); return f ? f[1] : 'unknown'; };
-let last = {}, edited = {};
+const cgmPage = location.pathname === '/cgm' || location.pathname === '/g7';
+if(cgmPage){ document.body.classList.add('cgm-page'); document.title = 'CGM | ESP-Sim'; $('navCgm').classList.add('active'); }
+else { $('navHome').classList.add('active'); }
 
-ALERTS.forEach((n,i)=>{ const l=document.createElement('label');
-  l.innerHTML='<input type="checkbox" data-slot="'+i+'"> '+n+' ('+i+')'; $('alertChecks').appendChild(l); });
-$('faultIn').innerHTML = FAULTS.map(f=>'<option value="'+f[0]+'">'+hex(f[0])+' — '+f[1].replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</option>').join('');
-$('faultIn').value = 28;
-['resIn','ageIn'].forEach(id=>$(id).oninput=()=>edited[id]=true);
-$('alertChecks').onchange = ()=>edited.alerts=true;
+function say(t){ const el = cgmPage ? $('cmsg') : $('msg'); if(!el) return; el.textContent=t;
+  if(t) setTimeout(()=>{ if(el.textContent===t) el.textContent=''; }, 4000); }
 
-function say(t){ $('msg').textContent=t; if(t) setTimeout(()=>{ if($('msg').textContent===t) $('msg').textContent=''; }, 4000); }
+/* ---- home: the overview, the firmware box and the comms counters ---- */
+const PATCH_STATES = {0:'none',1:'idle',2:'filled',3:'priming',4:'primed',5:'ejecting',6:'ejected',
+  32:'active',33:'active (alt)',64:'suspended (low BG)',65:'suspended (low BG)',66:'suspended (auto)',
+  67:'suspended (hourly max)',68:'suspended (daily max)',69:'suspended',70:'paused',96:'occlusion',
+  97:'expired',98:'reservoir empty',99:'patch fault',100:'patch fault 2',101:'base fault',
+  102:'battery empty',103:'no calibration'};
+const PATCH_FAULTS = [96,97,98,99,100,101,102,103];
+const oV = (id,v)=>{ const e=$(id); if(e) e.textContent = v; };
+const oChip = (id,text,cls)=>{ const e=$(id); if(e){ e.textContent=text; e.className='chip '+(cls||''); } };
 
-async function send(body, done){
+async function refreshBoard(){
   try {
-    const r = await fetch('/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const t = await r.text();
-    if(!r.ok) throw new Error(t.trim());
-    show(JSON.parse(t)); say(done);
-  } catch(e){ say('Failed — '+e.message); }
+    const s = await (await fetch('/settings/status')).json();
+    $('navSetup').hidden = !(s.ap && s.ap.active);
+    /* The counters come from the pod, so they are shown only when the board is
+       one; a YpsoPump has its own counters on the pump page, Medtrum none. */
+    $('commsCard').hidden = s.pump !== 0;
+    const f = s.firmware || {};
+    oV('fwBuilt', f.built || '—'); oV('fwIdf', f.idf || '—'); oV('fwTarget', f.target || '—');
+    oV('fwSize', f.size ? (Math.round(f.size/1024)+' KB ('+f.size+' bytes)') : '—');
+
+    oV('ovPumpName', s.pumpName || '—');
+    if (s.pump === 0) {
+      const p = await (await fetch('/status')).json();
+      oV('msgSeq', p.msgSeq); oV('cmdSeq', p.cmdSeq); oV('nonceSeq', p.nonceSeq);
+      oV('eapSeq', p.eapAkaSeq); oV('progSeq', p.lastProgSeqNum);
+      oChip('ovPumpState', p.connected ? 'connected' : 'not connected', p.connected ? 'ok' : '');
+      oV('ovPumpModel', (p.podType || 'DASH')+' pod');
+      oV('ovPumpPaired', p.paired ? 'yes, id '+p.id : 'not paired');
+      oV('ovPumpRes', (Math.round(p.reservoir*100)/100)+' U');
+      oV('ovPumpNote', p.fault ? 'fault 0x'+p.fault.toString(16).toUpperCase()
+        : p.progressName+' · '+Math.floor(p.minutesActive/60)+' h '+p.minutesActive%60+' min');
+    } else if (s.pump === 1) {
+      const y = await (await fetch('/ypso')).json();
+      oChip('ovPumpState', y.suspended ? 'suspended' : 'running', y.suspended ? 'warn' : 'ok');
+      oV('ovPumpModel', 'YpsoPump '+(y.firmware || ''));
+      oV('ovPumpPaired', y.connected ? (y.authorized ? 'yes, authorised' : 'connected, not authorised') : 'not connected');
+      oV('ovPumpRes', y.reservoir < 0 ? 'no cartridge' : (y.reservoir/100).toFixed(2)+' U');
+      oV('ovPumpNote', 'reboot '+y.reboot+', read '+y.readCounter+', write '+y.writeCounter);
+    } else {
+      const m = await (await fetch('/patch')).json();
+      oChip('ovPumpState', m.connected ? 'connected' : 'not connected', m.connected ? 'ok' : '');
+      oV('ovPumpModel', 'Medtrum '+m.model);
+      oV('ovPumpPaired', 'base '+m.serial);
+      oV('ovPumpRes', (Math.round(m.reservoir*100)/100)+' U');
+      oV('ovPumpNote', (PATCH_STATES[m.state] || ('state '+m.state))+(PATCH_FAULTS.indexOf(m.state) >= 0 ? ' (fault)' : ''));
+    }
+
+    const c = await (await fetch('/cgm/status')).json();
+    if (!c.kind) {
+      oV('ovCgmName', 'No CGM'); oChip('ovCgmState', 'off');
+      oV('ovCgmValue', '—'); oV('ovCgmNote', 'Nothing is advertising a sensor.');
+    } else {
+      oV('ovCgmName', KINDS[c.kind] || ('kind '+c.kind));
+      oChip('ovCgmState', CGM_STATES[c.state] || ('state '+c.state), c.state===6 ? 'ok' : c.state===2 ? 'warn' : 'bad');
+      oV('ovCgmValue', (c.last && c.last.glucose ? c.last.glucose : c.glucose)+' mg/dL');
+      oV('ovCgmNote', (c.connected ? 'phone connected' : c.advertising ? 'advertising' : 'waiting')
+        +' · '+(c.kind===7 ? 'code '+c.id : 'transmitter '+c.id));
+    }
+  } catch(e) {}
 }
 
-$('resSet').onclick = ()=>{ edited.resIn=false; send({command:'changeReservoir', value:+$('resIn').value}, 'Reservoir set'); };
-$('ageSet').onclick = ()=>{ edited.ageIn=false; send({command:'setActiveTime', value:Math.round(+$('ageIn').value*60)}, 'Pod age set'); };
-document.querySelectorAll('[data-hours]').forEach(b=>b.onclick=()=>{ edited.ageIn=false;
-  send({command:'setActiveTime', value:Math.round(+b.dataset.hours*60)}, 'Pod age set to '+b.dataset.hours+' h'); });
-$('alertsSet').onclick = ()=>{ let m=0; document.querySelectorAll('#alertChecks input').forEach(c=>{ if(c.checked) m|=1<<+c.dataset.slot; });
-  edited.alerts=false; send({command:'setAlerts', value:m}, 'Alerts set'); };
-$('faultSet').onclick = ()=>{ const c=+$('faultIn').value;
-  if(confirm('Fault the pod with '+hex(c)+' — '+faultName(c)+'? A faulted pod stops delivery and must be replaced.'))
-    send({command:'setFault', value:c}, 'Fault triggered'); };
-$('faultClear').onclick = ()=>send({command:'setFault', value:0}, 'Fault cleared');
-$('crashBefore').onclick = ()=>send({command:'crashNextCommand', beforeProcessing:true}, 'Armed');
-$('crashAfter').onclick = ()=>send({command:'crashNextCommand', beforeProcessing:false}, 'Armed');
-
-const FW_NAMES = ['V05.02.03','V35.01.00','V65.00.06','V03.00.00','V02.00.00'];
-let ypActive = false, ypLast = null;
-$('fwBox').hidden = true;
-$('typeIn').onchange = ()=>{ edited.type=true; $('fwBox').hidden = $('typeIn').value!=='2'; };
-$('fwIn').onchange = ()=>edited.type=true;
-async function pumpSelect(body, done){
-  try { const r = await fetch('/ypso',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const t = await r.text(); if(!r.ok) throw new Error(t.trim()); say(done); edited.type=false; } catch(e){ say('Failed — '+e.message); } }
-$('typeSet').onclick = ()=>{ const v=+$('typeIn').value;
-  if(v===2){ const fw=+$('fwIn').value, fresh=$('fwFresh').checked;
-    if(confirm('Become a '+(fresh?'new ':'')+'YpsoPump on firmware '+FW_NAMES[fw]+'? The board restarts.'))
-      pumpSelect({command:'pumpSelect', pump:1, fw:fw, fresh:fresh}, 'Restarting as a YpsoPump…');
-    return; }
-  const name = v ? 'Omnipod 5' : 'DASH';
-  if(ypActive){ if(confirm('Become an '+name+' pod? The board restarts.')) pumpSelect({command:'pumpSelect', pump:0, podType:v}, 'Restarting as an '+name+' pod…'); return; }
-  if(confirm('Forget this pod and become a new '+name+' pod?')) { edited.type=false; send({command:'setPodType', value:v}, 'Now a new '+name+' pod'); } };
-$('newPod').onclick = ()=>{ if(confirm('Forget this pod? The phone will need to pair a new one.')) send({command:'resetPod'}, 'New pod ready'); };
-async function wifi(body, done){
-  try { const r = await fetch('/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const t = await r.text(); if(!r.ok) throw new Error(t.trim()); say(done); } catch(e){ say('Failed — '+e.message); } }
-$('wifiSet').onclick = ()=>wifi({ssid:$('wifiSsid').value, password:$('wifiPass').value}, 'Saved — restarting');
-$('wifiForget').onclick = ()=>wifi({ssid:'', password:''}, 'Forgotten — restarting');
-
-function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
-
-function show(s){
-  last = s;
-  if(ypActive) return; /* the YpsoPump card speaks for the pump */
-  $('title').textContent = (s.podType || 'DASH') + ' pod';
-  if(!edited.type && !ypActive) $('typeIn').value = s.podType === 'Omnipod 5' ? '1' : '0';
-  $('podid').textContent = s.id ? 'id '+s.id : (s.paired ? '' : 'not paired');
-  chip($('link'), s.connected ? 'connected' : 'not connected', s.connected ? 'ok' : '');
-  $('reservoir').textContent = Math.round(s.reservoir*100)/100;
-  const p = s.fault ? ['bad'] : s.progress>=8 && s.progress<=9 ? ['ok'] : ['warn'];
-  chip($('progress'), s.progressName, p[0]);
-  $('delivered').textContent = units(s.delivered);
-  const h = Math.floor(s.minutesActive/60), m = s.minutesActive%60;
-  $('age').textContent = s.paired ? h+' h '+m+' min of 80 h' : '—';
-  $('basal').textContent = s.basalActive ? 'running' : 'not running';
-  $('temp').textContent = s.tempBasalActive ? 'until '+time(s.tempBasalEnd) : 'none';
-  $('bolus').textContent = s.bolusActive ? units(s.bolusRemaining)+' left' : 'none';
-  const active = ALERTS.filter((n,i)=>s.alerts & (1<<i));
-  $('alertsNow').textContent = active.length ? active.join(', ') : 'none';
-  $('faultNow').textContent = s.fault ? hex(s.fault)+' — '+faultName(s.fault)+' (at '+s.faultMinutes+' min)' : 'none';
-  if(!edited.resIn && document.activeElement!==$('resIn')) $('resIn').value = Math.round(s.reservoir*100)/100;
-  if(!edited.ageIn && document.activeElement!==$('ageIn')) $('ageIn').value = Math.round(s.minutesActive/15)/4;
-  if(!edited.alerts) document.querySelectorAll('#alertChecks input').forEach(c=>c.checked = !!(s.alerts & (1<<+c.dataset.slot)));
-  $('crashNote').firstChild.textContent = s.crashNext
-    ? 'Armed: the ESP32 reboots '+s.crashNext+' processing the next command that changes delivery. '
-    : 'The ESP32 reboots at the next command that changes delivery, leaving the phone without a response, then comes back as the same pod. Watch how the app recovers.';
-  $('msgSeq').textContent = s.msgSeq; $('cmdSeq').textContent = s.cmdSeq; $('nonceSeq').textContent = s.nonceSeq;
-  $('eapSeq').textContent = s.eapAkaSeq; $('progSeq').textContent = s.lastProgSeqNum;
-}
-
-async function refresh(){ try { show(await (await fetch('/status')).json()); } catch(e){} }
-refresh(); setInterval(refresh, 1000);
-
-/* ---- YpsoPump ---- */
-async function ypSend(body, done){
-  try { const r = await fetch('/ypso',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const t = await r.text(); if(!r.ok) throw new Error(t.trim()); const j = JSON.parse(t); say(done); return j; }
-  catch(e){ say('Failed — '+e.message); return null; } }
-const u2 = h=>(h/100).toFixed(2);
-$('ypSet').onclick = async ()=>{ const r=$('ypResIn').value.trim();
-  await ypSend({command:'ypsoReservoir', hundredths: r==='' ? -1 : Math.round(+r*100)}, 'Reservoir set');
-  const j = await ypSend({command:'ypsoBattery', level:+$('ypBatIn').value}, 'Set'); if(j) showYpso(j); };
-$('ypSuspend').onclick = async ()=>{ const on = !(ypLast && ypLast.suspended);
-  const j = await ypSend({command:'ypsoSuspend', on:on}, on ? 'Suspended' : 'Resumed'); if(j) showYpso(j); };
-$('ypReboot').onclick = async ()=>{ if(confirm('Restart the pump? Its reboot counter goes up, and the phone must authorise again.')) { const j = await ypSend({command:'ypsoReboot'}, 'Pump restarted'); if(j) showYpso(j); } };
-$('ypOpen').onchange = async ()=>{ const on = $('ypOpen').checked;
-  const j = await ypSend({command:'ypsoOpen', on:on}, on ? 'Any phone gets in' : 'Only the pump\'s password gets in'); if(j) showYpso(j); };
-$('ypBonds').onclick = ()=>{ if(confirm('Forget every Bluetooth bond? The phone must pair again (and may need to forget the pump too).')) ypSend({command:'ypsoForgetBonds'}, 'Bonds forgotten'); };
-function showYpso(y){
-  ypActive = !!y.active;
-  $('ypsoCard').hidden = !ypActive;
-  document.querySelectorAll('[aria-labelledby=h-status],[aria-labelledby=h-res],[aria-labelledby=h-age],[aria-labelledby=h-alerts],[aria-labelledby=h-fault],[aria-labelledby=h-crash],[aria-labelledby=h-newpod],[aria-labelledby=h-comms]')
-    .forEach(c=>c.hidden = ypActive);
-  if(!ypActive) return;
-  ypLast = y;
-  $('title').textContent = 'YpsoPump';
-  $('podid').textContent = y.name;
-  chip($('link'), y.connected ? 'connected' : 'not connected', y.connected ? 'ok' : '');
-  if(!edited.type){ $('typeIn').value='2'; $('fwIn').value=String(y.fw); $('fwBox').hidden=false; }
-  $('ypPassBox').hidden = !y.passkey; $('ypPasskey').textContent = y.passkey || '—';
-  if(document.activeElement!==$('ypOpen')) $('ypOpen').checked = !!y.open;
-  $('ypRes').textContent = y.reservoir < 0 ? 'no cartridge' : u2(y.reservoir);
-  chip($('ypState'), y.suspended ? 'suspended' : 'running', y.suspended ? 'warn' : 'ok');
-  $('ypName').textContent = y.name+' (serial '+String(y.serial).padStart(8,'0')+')';
-  $('ypFw').textContent = y.firmware;
-  $('ypLink').textContent = !y.connected ? 'not connected' : y.authorized ? 'connected, authorised' : y.open ? 'connected (let in without a password)' : 'connected, not authorised';
-  $('ypBasal').textContent = u2(y.basalNow)+' U/h';
-  $('ypTbr').textContent = y.tbrPercent===100 ? 'none' : y.tbrPercent+' %, '+y.tbrLeft+' min left';
-  $('ypBolus').textContent = y.bolusActive ? u2(y.bolusDelivered)+' of '+u2(y.bolusTotal)+' U' : 'none';
-  $('ypExt').textContent = y.extendedActive ? u2(y.extendedDelivered)+' of '+u2(y.extendedTotal)+' U' : 'none';
-  $('ypCounters').textContent = 'reboot '+y.reboot+', read '+y.readCounter+', write '+y.writeCounter+', '+y.events+' history entries';
-  $('ypSuspend').textContent = y.suspended ? 'Resume' : 'Suspend';
-  if(document.activeElement!==$('ypResIn')) $('ypResIn').value = y.reservoir < 0 ? '' : u2(y.reservoir);
-  if(document.activeElement!==$('ypBatIn')) $('ypBatIn').value = String(y.battery);
-}
-async function refreshYpso(){ try { showYpso(await (await fetch('/ypso')).json()); } catch(e){} }
-refreshYpso(); setInterval(refreshYpso, 1500);
+async function reboot(){ try { const r = await fetch('/settings/reboot',{method:'POST'}); if(!r.ok) throw new Error((await r.text()).trim()); say('Rebooting…'); } catch(e){ say('Failed — '+e.message); } }
+$('reboot').onclick = ()=>{ if(confirm('Reboot the board? It comes back with the same state.')) reboot(); };
 
 /* ---- CGM ---- */
 const CGM_STATES = {1:'Stopped',2:'Warm-up',6:'OK',16:'Session failed',18:'Temporary issue',24:'Expired',25:'Sensor failed',26:'Session ended'};
-let cgmEdited = {};
-['cgmGlucoseIn','cgmTrendIn','cgmStateIn','cgmKindIn'].forEach(id=>$(id).oninput=()=>cgmEdited[id]=true);
+const KINDS = {0:'No CGM',6:'Dexcom G6',7:'Dexcom G7'};
+let cgmEdited = {}, cgmStatus = null, cgmFetched = 0;
+['cgmGlucoseIn','cgmTrendIn','cgmMeanIn','cgmWalkIn','cgmStateIn','g6Id','cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn','cgmAmplitudeIn','cgmPeriodIn']
+  .forEach(id=>{ const e=$(id); if(e) e.oninput=()=>cgmEdited[id]=true; });
+
 async function cgmSend(body, done){
   try {
-    const r = await fetch('/cgm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r = await fetch('/cgm/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const t = await r.text();
     if(!r.ok) throw new Error(t.trim());
     showCgm(JSON.parse(t)); say(done);
   } catch(e){ say('Failed — '+e.message); }
 }
-const ago = s=>{ s=Math.max(0,Math.round(s)); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
-  return (d? d+' d ':'')+(d||h? h+' h ':'')+m+' min'; };
-$('cgmGlucoseSet').onclick = ()=>{ cgmEdited.cgmGlucoseIn=cgmEdited.cgmTrendIn=false;
-  cgmSend({command:'cgmGlucose', glucose:Math.round(+$('cgmGlucoseIn').value), trend:Math.round(+$('cgmTrendIn').value*10)}, 'Glucose set'); };
+
+/* The header box: pick the simulator. Starting a sensor uses the pairing code
+ * in its own box (G6) or makes a new one (G7). */
+document.querySelectorAll('#cgmSel button').forEach(b=>b.onclick=()=>{
+  const k = +b.dataset.kind;
+  const id = k===6 ? $('g6Id').value.trim().toUpperCase() : '';
+  const what = k===6 ? (id ? 'a G6 transmitter '+id : 'a new G6 transmitter') : k===7 ? 'a new G7 sensor' : 'no CGM';
+  if(k && !confirm('Start '+what+'? Use it only with a test phone that controls no real pump or pod.')) return;
+  cgmSend({command:'cgmNew', kind:k, id:id}, k ? 'Started '+what : 'CGM off');
+});
+$('g6New').onclick = ()=>{ const id=$('g6Id').value.trim().toUpperCase();
+  if(!confirm('Start '+(id?'G6 transmitter '+id:'a new G6 transmitter')+'?')) return;
+  cgmSend({command:'cgmNew', kind:6, id:id}, 'Started a G6'); };
+$('g7New').onclick = ()=>{ if(!confirm('Start a new G7 sensor? It makes a new pairing code.')) return;
+  cgmSend({command:'cgmNew', kind:7, id:''}, 'Started a G7'); };
 $('cgmStateSet').onclick = ()=>{ cgmEdited.cgmStateIn=false; cgmSend({command:'cgmState', state:+$('cgmStateIn').value}, 'State set'); };
 $('cgmSkip').onclick = ()=>cgmSend({command:'cgmSkipWarmup'}, 'Warm-up skipped');
 $('cgmLoss').onchange = ()=>cgmSend({command:'cgmSignalLoss', on:$('cgmLoss').checked}, $('cgmLoss').checked ? 'Signal lost' : 'Signal back');
-$('cgmNew').onclick = ()=>{ const k=+$('cgmKindIn').value, id=$('cgmIdIn').value.trim().toUpperCase();
-  const what = k===6 ? 'a new G6 transmitter' : k===7 ? 'a new G7 sensor' : 'no CGM';
-  if(k && !confirm('Start '+what+'? Use it only with a test phone that controls no real pump or pod.')) return;
-  cgmEdited.cgmKindIn=false; cgmSend({command:'cgmNew', kind:k, id:id}, k ? 'Started '+what : 'CGM off'); };
+
+/* The source box: the four ways to make glucose, each with its own settings. */
+document.querySelectorAll('#cgmModeSel button').forEach(b=>b.onclick=()=>{
+  const m = b.dataset.mode;
+  if(m==='person'){ sendPerson(); return; }
+  const body = {command:'cgmSetPattern', pattern:m};
+  if(m==='fixed'){ body.value = Math.round(+$('cgmGlucoseIn').value); body.trend = Math.round(+$('cgmTrendIn').value*10); }
+  if(m==='sine'){ body.value = Math.round(+$('cgmMeanIn').value); body.amplitude = Math.round(+$('cgmAmplitudeIn').value); body.periodMinutes = Math.round(+$('cgmPeriodIn').value); }
+  if(m==='walk'){ body.value = Math.round(+$('cgmWalkIn').value); }
+  cgmSend(body, 'Now simulating '+m);
+});
+function sendPerson(){
+  ['cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn'].forEach(id=>cgmEdited[id]=false);
+  cgmSend({command:'cgmPattern', pattern:1, source:+$('cgmSourceIn').value,
+    isf:Math.round(+$('cgmIsfIn').value), icr:Math.round(+$('cgmIcrIn').value), basalNeed:Math.round(+$('cgmBasalIn').value*100)}, 'Now the virtual person');
+}
+$('cgmPersonSet').onclick = ()=>{ ['cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn'].forEach(id=>cgmEdited[id]=false);
+  cgmSend({command:'cgmPattern', pattern:1, source:+$('cgmSourceIn').value,
+    isf:Math.round(+$('cgmIsfIn').value), icr:Math.round(+$('cgmIcrIn').value), basalNeed:Math.round(+$('cgmBasalIn').value*100)}, 'Applied'); };
+$('cgmFixedSet').onclick = ()=>{ cgmEdited.cgmGlucoseIn=cgmEdited.cgmTrendIn=false;
+  cgmSend({command:'cgmSetPattern', pattern:'fixed', value:Math.round(+$('cgmGlucoseIn').value), trend:Math.round(+$('cgmTrendIn').value*10)}, 'Fixed applied'); };
+$('cgmSineSet').onclick = ()=>{ cgmEdited.cgmMeanIn=cgmEdited.cgmAmplitudeIn=cgmEdited.cgmPeriodIn=false;
+  cgmSend({command:'cgmSetPattern', pattern:'sine', value:Math.round(+$('cgmMeanIn').value), amplitude:Math.round(+$('cgmAmplitudeIn').value), periodMinutes:Math.round(+$('cgmPeriodIn').value)}, 'Wave applied'); };
+$('cgmWalkSet').onclick = ()=>{ cgmEdited.cgmWalkIn=false;
+  cgmSend({command:'cgmSetPattern', pattern:'walk', value:Math.round(+$('cgmWalkIn').value)}, 'Walk applied'); };
+$('cgmSnack').onclick = ()=>cgmSend({command:'cgmEat', grams:20}, 'The person has a snack');
+$('cgmExercise').onclick = ()=>cgmSend({command:'cgmExercise', minutes:45}, 'The person goes for a run');
+
+function modeView(kind){
+  ['idle'].forEach(()=>{});
+  $('modePerson').hidden = kind!=='person';
+  $('modeFixed').hidden = kind!=='fixed';
+  $('modeSine').hidden = kind!=='sine';
+  $('modeWalk').hidden = kind!=='walk';
+  document.querySelectorAll('#cgmModeSel button').forEach(b=>b.classList.toggle('active', b.dataset.mode===kind));
+}
+
+const ago = s=>{ s=Math.max(0,Math.round(s)); const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  return (d? d+' d ':'')+(d||h? h+' h ':'')+m+' min'; };
+const hm = t=>new Date(t*1000).toLocaleTimeString([], {timeStyle:'short'});
+
 function showCgm(c){
-  const now = Date.now()/1000;
-  if(!cgmEdited.cgmKindIn) $('cgmKindIn').value = String(c.kind);
-  if(!c.kind){ $('cgmGlucose').textContent='—'; chip($('cgmState'),'off');
-    ['cgmDevice','cgmAge','cgmLast','cgmNext','cgmLink'].forEach(id=>$(id).textContent='—'); return; }
+  const now = c.now || Date.now()/1000;
+  const kind = c.kind|0;
+  document.querySelectorAll('#cgmSel button').forEach(b=>b.classList.toggle('active', +b.dataset.kind===kind));
+  $('cgmSensorBox').hidden = !kind;
+  $('cgmSourceCard').hidden = !kind;
+  if(!kind){ cgmStatus = null; return; }
+  cgmStatus = c; cgmFetched = performance.now(); cgmCountdown();
+  $('g6Box').hidden = kind!==6;
+  $('g7Box').hidden = kind!==7;
+  if(kind===6 && document.activeElement!==$('g6Id') && !$('g6Id').value) $('g6Id').value = c.id || '';
+  if(kind===7) $('g7Pair').textContent = (c.name||'—')+(c.id? ', code '+c.id : '');
   $('cgmGlucose').textContent = c.last && c.last.glucose ? c.last.glucose : c.glucose;
   const st = CGM_STATES[c.state] || ('state '+c.state);
   chip($('cgmState'), st+(c.forcedState?' (set)':''), c.state===6 ? 'ok' : c.state===2 ? 'warn' : 'bad');
-  $('cgmDevice').textContent = c.kind===6 ? 'Dexcom G6, transmitter '+c.id+' ('+c.name+')' : 'Dexcom G7, '+c.name;
-  $('cgmAge').textContent = ago(now-(c.kind===6 ? c.sessionStart||now : c.activated))+(c.kind===6 && !c.sessionStart ? ' (no session)' : '')
+  $('cgmDevice').textContent = kind===6 ? 'Dexcom G6, transmitter '+c.id+' ('+c.name+')' : 'Dexcom G7, '+c.name;
+  $('cgmAge').textContent = ago(now-(kind===6 ? c.sessionStart||now : c.activated))+(kind===6 && !c.sessionStart ? ' (no session)' : '')
     +(c.warmupDone>now ? ', warm-up ends in '+ago(c.warmupDone-now) : '');
   $('cgmLast').textContent = c.last ? (c.last.glucose ? c.last.glucose+' mg/dL' : 'no glucose')+', '+ago(now-c.last.t)+' ago, '+(c.last.sent ? 'sent' : 'not yet sent') : 'none';
-  $('cgmNext').textContent = 'in '+ago(c.nextReading-now);
   $('cgmLink').textContent = c.connected ? 'phone connected' : c.signalLoss ? 'signal loss: not advertising' : c.advertising ? 'advertising' : 'waiting for the next reading';
-  if(!cgmEdited.cgmGlucoseIn && document.activeElement!==$('cgmGlucoseIn')) $('cgmGlucoseIn').value = c.glucose;
-  if(!cgmEdited.cgmTrendIn && document.activeElement!==$('cgmTrendIn')) $('cgmTrendIn').value = c.trend/10;
   if(!cgmEdited.cgmStateIn) $('cgmStateIn').value = String(c.forcedState);
   $('cgmLoss').checked = c.signalLoss;
   showPerson(c);
 }
+function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
 
-['cgmPatternIn','cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn'].forEach(id=>$(id).oninput=()=>cgmEdited[id]=true);
-$('cgmPatternSet').onclick = ()=>{ ['cgmPatternIn','cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn'].forEach(id=>cgmEdited[id]=false);
-  cgmSend({command:'cgmPattern', pattern:+$('cgmPatternIn').value, source:+$('cgmSourceIn').value,
-    isf:Math.round(+$('cgmIsfIn').value), icr:Math.round(+$('cgmIcrIn').value), basalNeed:Math.round(+$('cgmBasalIn').value*100)}, 'Applied'); };
-$('cgmPatternIn').onchange = ()=>{ cgmEdited.cgmPatternIn=true; cgmModeView(+$('cgmPatternIn').value); };
-$('cgmSnack').onclick = ()=>cgmSend({command:'cgmEat', grams:20}, 'The person has a snack');
-$('cgmExercise').onclick = ()=>cgmSend({command:'cgmExercise', minutes:45}, 'The person goes for a run');
-function cgmModeView(p){ $('cgmManualRow').hidden = p===1; ['cgmSourceBox','cgmPersonRow','cgmPersonInfo','cgmPersonActions'].forEach(id=>$(id).hidden = p!==1); }
-const hm = t=>new Date(t*1000).toLocaleTimeString([], {timeStyle:'short'});
 function showPerson(c){
-  if(!cgmEdited.cgmPatternIn) $('cgmPatternIn').value = String(c.pattern);
+  const kind = c.pattern || 'fixed';
   if(!cgmEdited.cgmSourceIn) $('cgmSourceIn').value = String(c.insulinSource);
   if(!cgmEdited.cgmIsfIn && document.activeElement!==$('cgmIsfIn')) $('cgmIsfIn').value = c.isf;
   if(!cgmEdited.cgmIcrIn && document.activeElement!==$('cgmIcrIn')) $('cgmIcrIn').value = c.icr;
   if(!cgmEdited.cgmBasalIn && document.activeElement!==$('cgmBasalIn')) $('cgmBasalIn').value = (c.basalNeed/100).toFixed(2);
-  cgmModeView(cgmEdited.cgmPatternIn ? +$('cgmPatternIn').value : c.pattern);
-  if(c.pattern!==1){ $('cgmPersonInfo').textContent=''; return; }
+  if(!cgmEdited.cgmAmplitudeIn && document.activeElement!==$('cgmAmplitudeIn')) $('cgmAmplitudeIn').value = c.amplitude;
+  if(!cgmEdited.cgmPeriodIn && document.activeElement!==$('cgmPeriodIn')) $('cgmPeriodIn').value = c.periodMinutes;
+  /* each source keeps its own value: mean for wave, target for walk, value for fixed */
+  if(!cgmEdited.cgmMeanIn && document.activeElement!==$('cgmMeanIn') && kind==='sine') $('cgmMeanIn').value = c.glucose;
+  if(!cgmEdited.cgmGlucoseIn && document.activeElement!==$('cgmGlucoseIn')) $('cgmGlucoseIn').value = c.glucose;
+  if(!cgmEdited.cgmTrendIn && document.activeElement!==$('cgmTrendIn')) $('cgmTrendIn').value = c.trend/10;
+  if(!cgmEdited.cgmWalkIn && document.activeElement!==$('cgmWalkIn')) $('cgmWalkIn').value = c.glucose;
+  modeView(kind);
+  if(kind!=='person'){ $('cgmPersonInfo').textContent=''; return; }
   const parts = ['True glucose '+c.trueGlucose+' mg/dL', 'insulin on board '+c.iob.toFixed(2)+' U'];
   if(c.lastMeal) parts.push('last ate '+c.lastFood+' ('+c.lastMealGrams+' g) at '+hm(c.lastMeal));
   if(c.nextMeal) parts.push('next: '+c.nextFood+' ('+c.nextMealGrams+' g) around '+hm(c.nextMeal));
   $('cgmPersonInfo').textContent = parts.join(' · ');
 }
-async function refreshCgm(){ try { showCgm(await (await fetch('/cgm')).json()); } catch(e){} }
-refreshCgm(); setInterval(refreshCgm, 2000);
+
+/* The next reading's countdown: mm:ss from the status's own clock (now /
+ * nextReading), ticked once a second and clamped at 0:00. */
+function cgmCountdown(){
+  if(!cgmStatus || !cgmStatus.kind) return;
+  const elapsed = (performance.now() - cgmFetched)/1000;
+  let s = Math.max(0, Math.round(cgmStatus.nextReading - (cgmStatus.now + elapsed)));
+  $('cgmNext').textContent = Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+}
+setInterval(cgmCountdown, 1000);
+
+async function refreshCgm(){ try { showCgm(await (await fetch('/cgm/status')).json()); } catch(e){} }
+if(cgmPage){ refreshCgm(); setInterval(refreshCgm, 2000); }
+else { refreshBoard(); setInterval(refreshBoard, 2000); }
 </script>
 </body>
 </html>

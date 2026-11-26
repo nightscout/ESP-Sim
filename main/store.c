@@ -117,6 +117,26 @@ void store_save_ypso_peers(const uint8_t *p, size_t n)
     nvs_commit(nvs);
 }
 
+/* The Medtrum base's identity and delivery model, under its own key so it is
+ * kept while the board is a pod or a YpsoPump. The magic/version are checked
+ * in medtrum_app.c, which knows the layout. */
+bool store_load_medtrum(medtrum_saved_t *st)
+{
+    size_t len = sizeof *st;
+    return nvs_get_blob(nvs, "medtrum", st, &len) == ESP_OK && len == sizeof *st;
+}
+
+void store_save_medtrum(void *ctx, const medtrum_saved_t *st)
+{
+    esp_err_t err = nvs_set_blob(nvs, "medtrum", st, sizeof *st);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "could not save the Medtrum state: %s", esp_err_to_name(err));
+    }
+}
+
 /* The YpsoPump lets phones in without its password unless told not to. */
 bool store_load_ypso_open(void)
 {

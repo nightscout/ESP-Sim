@@ -33,7 +33,8 @@ typedef enum {
 
 #define CGM_READING_INTERVAL 300 /* seconds */
 #define CGM_HISTORY 36           /* readings kept for backfill: 3 hours */
-#define CGM_STATE_VERSION 1
+#define CGM_STATE_VERSION 2
+#define CGM_MAX_SESSIONS 2 /* one per Bluetooth link the board can hold */
 
 /* Algorithm states, as both G6 and G7 number them. */
 enum {
@@ -55,10 +56,30 @@ typedef struct {
     int8_t trend;    /* tenths of mg/dL per minute */
 } cgm_reading_t;
 
+/* What the next reading does. The generator below is pure: the same previous
+ * reading, pattern, parameters and reading number always give the same next
+ * reading and trend. Both sensor kinds use it; only the frame around the
+ * number differs. CGM_PATTERN_PERSON is ESP-Sim's virtual person: it is not a
+ * curve and does not go through the generator (see make_reading). */
 typedef enum {
-    CGM_PATTERN_MANUAL = 0, /* the panel's glucose, moved by the panel's trend */
+    CGM_PATTERN_FIXED = 0,  /* the panel's glucose, moved by the panel's trend */
     CGM_PATTERN_PERSON = 1, /* a virtual person: meals, insulin, dawn, exercise, drift, sensor noise */
+    CGM_PATTERN_SINE = 2,   /* a wave around a mean */
+    CGM_PATTERN_WALK = 3,   /* a slow random walk seeking a target */
+} cgm_pattern_kind_t;
+
+typedef struct {
+    cgm_pattern_kind_t kind;
+    uint16_t value;          /* fixed: the next reading; sine: the mean; walk: the target */
+    int8_t trend;            /* fixed: tenths of mg/dL per minute; ignored by the curves */
+    uint16_t amplitude;      /* sine: mg/dL either side of the mean */
+    uint16_t period_minutes; /* sine: minutes for one full wave */
 } cgm_pattern_t;
+
+typedef struct {
+    uint16_t glucose; /* mg/dL, within 40..400 */
+    int8_t trend;     /* tenths of mg/dL per minute, -127..126 */
+} cgm_next_reading_t;
 
 typedef enum {
     CGM_INSULIN_SELF = 0, /* the person doses themselves: basal, and (imperfect) meal boluses */
@@ -113,27 +134,61 @@ typedef struct {
     bool signal_loss;      /* stop advertising: readings are missed, and backfilled later */
     /* Readings. */
     uint32_t next_n;       /* the next reading is due at activated + next_n * 5 minutes */
-    uint32_t delivered;    /* the last reading's seq the phone was sent, 0 if none */
+    uint32_t delivered;    /* the last reading's seq any central was sent, 0 if none */
     uint16_t calibration;  /* G6: the last calibration, mg/dL */
     uint32_t calibration_t;
     uint8_t n_hist;
     cgm_reading_t hist[CGM_HISTORY]; /* oldest first */
-    /* Added later, at the end: an older save loads with these zero, which is
-     * the manual pattern (see store_load_cgm). */
-    uint8_t pattern;        /* cgm_pattern_t */
+    /* Added after the readings, so an older save loads with these zero (the
+     * fixed pattern, see store_load_cgm). */
+    uint8_t pattern;        /* cgm_pattern_kind_t */
     uint8_t insulin_source; /* cgm_insulin_t */
     uint16_t isf;           /* the person: mg/dL one unit lowers */
     uint16_t icr;           /* grams of carbohydrate one unit covers */
     uint16_t basal_need;    /* hundredths of a unit an hour that hold glucose level */
     cgm_person_t person;
+    /* The pattern generator's parameters, added after the person fields so an
+     * older save still loads (the length gate in store_load_cgm). */
+    uint16_t amplitude;      /* sine: mg/dL either side of the mean */
+    uint16_t period_minutes; /* sine: minutes for one full wave */
 } cgm_state_t;
+
+/* A session is one central's Bluetooth connection. CGM_MAX_SESSIONS mirrors
+ * the board's two Bluetooth links; a session token is its slot number, 0 or 1.
+ * The sensor's state and reading history above are shared, but everything that
+ * describes one central's conversation is not. A session lives only for its
+ * connection: cgm_on_connect() clears it, so a later central (or the same one,
+ * whose privacy address may have rotated) always starts fresh. */
+typedef uint8_t cgm_session_t;
+
+typedef struct {
+    bool connected;
+    bool sent_glucose;        /* this central was sent the current reading */
+    bool authed;              /* G6 active mode: this central passed the challenge */
+    bool control_on;          /* this central subscribed to the CONTROL notifications */
+    uint8_t challenge[8];
+    uint8_t auth_value[17];   /* what a read of the auth characteristic returns */
+    uint8_t auth_len;
+    int64_t connected_at, last_activity;
+    /* This connection's delivery history: the last reading seq it was sent.
+     * cgm_on_connect() clears it, so the next connection starts from nothing
+     * and its backfill asks for the whole history the app has not received in
+     * that connection. */
+    uint32_t delivered;
+    /* The backfill cursor. A connection starts it at 0 (cgm_on_connect()
+     * clears the whole session), so backfill sends every history reading this
+     * connection has not had; another central's deliveries do not move it. */
+    uint32_t prev_delivered;
+} cgm_session_state_t;
 
 typedef struct {
     void *ctx;
-    /* Sends p on chr to the connected phone (a notification). */
-    void (*send)(void *ctx, cgm_chr_t chr, const uint8_t *p, size_t n);
-    void (*disconnect)(void *ctx);
-    /* Advertise (or stop) under name, from the sensor's address. */
+    /* Sends p on chr to that central (a notification). */
+    void (*send)(void *ctx, cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n);
+    /* Ends that central's connection only. */
+    void (*disconnect)(void *ctx, cgm_session_t session);
+    /* Advertise (or stop) under name, from the sensor's address. Sensor-wide,
+     * like now/save/log: advertising is not per central. */
     void (*advertise)(void *ctx, bool on, const char *name, const uint8_t addr[6]);
     int64_t (*now)(void *ctx); /* Unix seconds */
     void (*save)(void *ctx, const cgm_state_t *st);
@@ -148,46 +203,60 @@ typedef struct {
 typedef struct {
     cgm_state_t st;
     const cgm_io_t *io;
-    /* The connection. */
-    bool connected;
-    bool sent_glucose;
-    bool authed;              /* G6 active mode: the app passed the challenge */
-    uint8_t challenge[8];
-    uint8_t auth_value[17];   /* what a read of the auth characteristic returns */
-    uint8_t auth_len;
-    int64_t connected_at, last_activity;
-    uint32_t prev_delivered;  /* st.delivered when this connection began */
+    /* One per central. The sensor's state (st) and advertising window are
+     * shared; each session's login, deliveries and backfill cursor are not. */
+    cgm_session_state_t sessions[CGM_MAX_SESSIONS];
     /* Advertising. */
     bool advertising;
-    int64_t window_end;
+    int64_t window_end; /* CGM_G7: the 60 s window closes here */
 } cgm_t;
 
 /* A fresh G6 transmitter (id NULL: a random one) or G7 sensor, started now. */
 void cgm_state_fresh(cgm_state_t *st, cgm_kind_t kind, const char *id, int64_t now);
+/* Bring an older saved state up to CGM_STATE_VERSION. */
+void cgm_state_migrate(cgm_state_t *st);
 /* The name it advertises: "Dexcom" + the id's last 2 (G6), "DXCM" + 2 (G7). */
 void cgm_name(const cgm_state_t *st, char out[16]);
 bool cgm_valid_g6_id(const char *id);
 
+/* The pure generator behind a fixed, sine or walk reading. `previous` is the
+ * last reading's glucose (0 when there is none). A fixed pattern returns
+ * `p->value`; a sine's or walk's first reading starts from 120 when `previous`
+ * is 0. No clock, storage or RNG: the reading number carries all the
+ * variation. */
+cgm_next_reading_t cgm_pattern_next(const cgm_pattern_t *p, uint16_t previous, uint32_t reading_number);
+const char *cgm_pattern_name(cgm_pattern_kind_t kind);
+bool cgm_pattern_from_name(const char *name, cgm_pattern_kind_t *out);
+
 void cgm_init(cgm_t *c, const cgm_state_t *st, const cgm_io_t *io);
-/* Call about once a second: makes readings, opens and closes the advertising
- * window, ends idle connections. */
+/* Call about once a second: makes readings, keeps a G6 advertising while it
+ * is unconnected (a G7 opens and closes a window per reading), delivers a new
+ * reading to each connected central that subscribed to CONTROL and has not
+ * had it, and ends each idle G7 session on its own (a G6 keeps its
+ * connection). */
 void cgm_tick(cgm_t *c);
 
-/* From the radio. read returns the value's length. */
-void cgm_on_connect(cgm_t *c);
-void cgm_on_disconnect(cgm_t *c);
-void cgm_on_subscribe(cgm_t *c, cgm_chr_t chr, bool on);
-void cgm_on_write(cgm_t *c, cgm_chr_t chr, const uint8_t *p, size_t n);
-size_t cgm_on_read(cgm_t *c, cgm_chr_t chr, uint8_t *out, size_t cap);
+/* From the radio. session is the central's slot, 0 .. CGM_MAX_SESSIONS-1; an
+ * out-of-range token is ignored. Every callback names the central it is about,
+ * and the reply (send) and hang-up (disconnect) name it back. read returns the
+ * value's length. A connect always starts a new session: cgm_on_connect()
+ * clears every field that describes the previous connection. */
+void cgm_on_connect(cgm_t *c, cgm_session_t session);
+void cgm_on_disconnect(cgm_t *c, cgm_session_t session);
+void cgm_on_subscribe(cgm_t *c, cgm_session_t session, cgm_chr_t chr, bool on);
+void cgm_on_write(cgm_t *c, cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n);
+size_t cgm_on_read(cgm_t *c, cgm_session_t session, cgm_chr_t chr, uint8_t *out, size_t cap);
 
 /* The control panel. */
 void cgm_set_glucose(cgm_t *c, uint16_t glucose, int8_t trend);
 void cgm_set_state(cgm_t *c, uint8_t forced_state);
 void cgm_set_signal_loss(cgm_t *c, bool on);
 void cgm_skip_warmup(cgm_t *c);
+/* The fixed/sine/walk pattern. A PERSON kind is stored as FIXED; use
+ * cgm_set_person() to switch to the virtual person. */
+void cgm_set_pattern(cgm_t *c, const cgm_pattern_t *p);
 /* The virtual person (CGM_PATTERN_PERSON). 0 keeps a value as it is. */
-void cgm_set_pattern(cgm_t *c, cgm_pattern_t pattern, cgm_insulin_t source, uint16_t isf, uint16_t icr,
-                     uint16_t basal_need);
+void cgm_set_person(cgm_t *c, cgm_insulin_t source, uint16_t isf, uint16_t icr, uint16_t basal_need);
 void cgm_eat(cgm_t *c, uint16_t grams);        /* a snack now, on top of the person's own meals */
 const char *cgm_food_name(uint8_t food);
 void cgm_exercise(cgm_t *c, uint16_t minutes); /* exercise starting now */
