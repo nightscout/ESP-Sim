@@ -32,9 +32,9 @@ static const ypso_fw_info_t FW[YPSO_FW_COUNT] = {
     [YPSO_FW_V35] = {"V35.01.00 (encrypted, study firmware)", "1.2", "V35.01.00", "V01.02.03", "1.7", "1.4", "1.4",
                      "1.0", true, true, true, true, true, 20, 1},
     [YPSO_FW_V65] = {"V65.00.06 (OPN, clear text, Control 1.0)", "1.1", "V65.00.06", "V01.00.00", "1.3", "1.1", "1.0",
-                     "", true, false, false, false, false, 18, 10},
+                     "", true, false, false, false, false, 18, 1},
     [YPSO_FW_V03] = {"V03.00.00 (OPN, clear text, Control 1.1)", "1.1", "V03.00.00", "V01.00.00", "1.5", "1.1", "1.1",
-                     "", true, false, false, false, false, 18, 10},
+                     "", true, false, false, false, false, 18, 1},
     [YPSO_FW_V02] = {"V02.00.00 (baseline, no Control service)", "1.0", "V02.00.00", "V01.00.00", "1.5", "1.1", "",
                      "", false, false, false, false, false, 18, 10},
 };
@@ -430,21 +430,26 @@ static uint32_t pump_t2000(ypso_t *y)
 /* ---- history ------------------------------------------------------------------------------ */
 
 enum {
+    EV_BOLUS_DELAYED_RUNNING = 1,
     EV_BOLUS_IMMEDIATE = 2,
     EV_BOLUS_DELAYED = 3,
     EV_BASAL_A_CHANGED = 7,
+    EV_TBR_RUNNING = 9,
     EV_TBR = 10,
     EV_DATE_CHANGED = 12,
     EV_TIME_CHANGED = 13,
     EV_PUMP_MODE_CHANGED = 14,
+    EV_BOLUS_COMBINED_RUNNING = 17,
     EV_BOLUS_COMBINED = 18,
+    EV_BOLUS_IMMEDIATE_RUNNING = 19,
     EV_BOLUS_IMMEDIATE_ABORT = 29,
     EV_BOLUS_DELAYED_ABORT = 30,
     EV_BOLUS_COMBINED_ABORT = 31,
     EV_TBR_ABORT = 32,
 };
 
-static void event(ypso_t *y, uint8_t type, uint16_t a, uint16_t b, uint16_t c)
+/* A new history entry, stamped now. Its sequence. */
+static uint32_t event(ypso_t *y, uint8_t type, uint16_t a, uint16_t b, uint16_t c)
 {
     ypso_state_t *st = &y->st;
     if (st->n_events == YPSO_EVENTS) {
@@ -459,6 +464,28 @@ static void event(ypso_t *y, uint8_t type, uint16_t a, uint16_t b, uint16_t c)
     e->v[1] = b;
     e->v[2] = c;
     y->dirty = true;
+    return e->seq;
+}
+
+/* A bolus or temp basal ends: like the pump, written over its own _RUNNING
+ * entry, which keeps its place, its sequence and its START stamp (rockit
+ * ypso-driver history.rs `ends_in_place`, seen on hardware). A new entry
+ * only if that one is gone (rolled off, or a state saved before). */
+static void finish_event(ypso_t *y, uint32_t seq, uint8_t type, uint16_t a, uint16_t b, uint16_t c)
+{
+    ypso_state_t *st = &y->st;
+    for (int i = st->n_events - 1; seq && i >= 0; i--) {
+        ypso_event_t *e = &st->events[i];
+        if (e->seq == seq) {
+            e->type = type;
+            e->v[0] = a;
+            e->v[1] = b;
+            e->v[2] = c;
+            y->dirty = true;
+            return;
+        }
+    }
+    event(y, type, a, b, c);
 }
 
 /* §5.8: 19 bytes, newest first from index 0. */
@@ -553,7 +580,8 @@ static void end_immediate(ypso_t *y, bool aborted)
 {
     ypso_state_t *st = &y->st;
     st->imm.status = 4;
-    event(y, aborted ? EV_BOLUS_IMMEDIATE_ABORT : EV_BOLUS_IMMEDIATE, (uint16_t)st->imm.delivered, 0, 0);
+    finish_event(y, st->imm.seq, aborted ? EV_BOLUS_IMMEDIATE_ABORT : EV_BOLUS_IMMEDIATE, (uint16_t)st->imm.delivered,
+                 0, 0);
     ylog(y, "bolus %s: %d.%02d U", aborted ? "stopped" : "done", (int)st->imm.delivered / 100,
          (int)st->imm.delivered % 100);
     if (aborted) {
@@ -568,10 +596,10 @@ static void end_slow(ypso_t *y, bool aborted)
     int32_t total = st->slow.delivered + st->slow.now_delivered;
     int32_t minutes = (int32_t)((y->io->now(y->io->ctx) - st->slow.start) / 60);
     if (combo) {
-        event(y, aborted ? EV_BOLUS_COMBINED_ABORT : EV_BOLUS_COMBINED, (uint16_t)total,
+        finish_event(y, st->slow.seq, aborted ? EV_BOLUS_COMBINED_ABORT : EV_BOLUS_COMBINED, (uint16_t)total,
               (uint16_t)st->slow.now_delivered, (uint16_t)(aborted ? minutes : st->slow.minutes));
     } else {
-        event(y, aborted ? EV_BOLUS_DELAYED_ABORT : EV_BOLUS_DELAYED, (uint16_t)total,
+        finish_event(y, st->slow.seq, aborted ? EV_BOLUS_DELAYED_ABORT : EV_BOLUS_DELAYED, (uint16_t)total,
               (uint16_t)(aborted ? minutes : st->slow.minutes), 0);
     }
     ylog(y, "extended bolus %s: %d.%02d U", aborted ? "stopped" : "done", (int)total / 100, (int)total % 100);
@@ -582,8 +610,9 @@ static void end_tbr(ypso_t *y, bool aborted)
 {
     ypso_state_t *st = &y->st;
     int32_t ran = (int32_t)((y->io->now(y->io->ctx) - st->tbr_start) / 60);
-    event(y, aborted ? EV_TBR_ABORT : EV_TBR, (uint16_t)st->tbr_percent,
-          (uint16_t)(aborted ? ran : st->tbr_minutes), 0);
+    finish_event(y, st->tbr_seq, aborted ? EV_TBR_ABORT : EV_TBR, (uint16_t)st->tbr_percent,
+                 (uint16_t)(aborted ? ran : st->tbr_minutes), 0);
+    st->tbr_seq = 0;
     ylog(y, "temp basal %d%% %s", (int)st->tbr_percent, aborted ? "cancelled" : "ended");
     st->tbr_percent = 100;
     st->tbr_minutes = 0;
@@ -595,11 +624,13 @@ void ypso_tick(ypso_t *y)
     ypso_state_t *st = &y->st;
     int64_t now = y->io->now(y->io->ctx);
     int64_t dt = now - y->last_tick;
-    if (dt <= 0) {
+    if (dt == 0) {
         return;
     }
-    if (dt > 3600) {
-        dt = 3600; /* the board was off: don't run an hour of catch-up per tick */
+    if (dt < 0 || dt > 60) {
+        /* The board's clock stepped (the time came from the network): a tick
+         * runs every second, so this is not time that passed. */
+        dt = 1;
     }
     y->last_tick = now;
     for (int64_t s = 0; s < dt; s++) {
@@ -854,7 +885,8 @@ static int start_bolus(ypso_t *y, int32_t total, int32_t minutes, int32_t now_pa
             return YPSO_VALUE_INVALID;
         }
         st->imm.status = 1;
-        st->imm.seq = ++st->bolus_seq;
+        /* The bolus status's sequence is its history entry's (§5.4). */
+        st->imm.seq = event(y, EV_BOLUS_IMMEDIATE_RUNNING, (uint16_t)total, 0, 0);
         st->imm.total = total;
         st->imm.delivered = 0;
         ylog(y, "bolus %d.%02d U", (int)total / 100, (int)total % 100);
@@ -875,7 +907,9 @@ static int start_bolus(ypso_t *y, int32_t total, int32_t minutes, int32_t now_pa
             return YPSO_VALUE_INVALID;
         }
         st->slow.status = 1;
-        st->slow.seq = ++st->bolus_seq;
+        st->slow.seq = now_part > 0 ? event(y, EV_BOLUS_COMBINED_RUNNING, (uint16_t)total, (uint16_t)now_part,
+                                            (uint16_t)minutes)
+                                    : event(y, EV_BOLUS_DELAYED_RUNNING, (uint16_t)total, (uint16_t)minutes, 0);
         st->slow.total = total - now_part;
         st->slow.delivered = 0;
         st->slow.now_total = now_part;
@@ -910,11 +944,13 @@ static int set_tbr(ypso_t *y, int32_t percent, int32_t minutes)
     int32_t longest = percent <= TBR_LONG_MAX ? TBR_LONG_MINUTES : TBR_SHORT_MINUTES;
     if (percent < 0 || percent > (TBR_LONG_MAX > TBR_SHORT_MAX ? TBR_LONG_MAX : TBR_SHORT_MAX) ||
         percent % f->tbr_step || minutes < 15 || minutes > longest || minutes % 15) {
+        ylog(y, "temp basal %d%% for %d min refused: off the pump's steps or limits", (int)percent, (int)minutes);
         return YPSO_VALUE_INVALID;
     }
     st->tbr_percent = percent;
     st->tbr_minutes = minutes;
     st->tbr_start = y->io->now(y->io->ctx);
+    st->tbr_seq = event(y, EV_TBR_RUNNING, (uint16_t)percent, (uint16_t)minutes, 0);
     ylog(y, "temp basal %d%% for %d min", (int)percent, (int)minutes);
     y->dirty = true;
     return YPSO_OK;
@@ -946,6 +982,30 @@ static int set_clock(ypso_t *y, bool date, const uint8_t *p, size_t n)
     }
     y->st.clock_offset += day * 86400 + sec - cur;
     return YPSO_OK;
+}
+
+bool ypso_clock_to_local(ypso_t *y)
+{
+    int64_t now = y->io->now(y->io->ctx);
+    int64_t local = now + (y->io->utc_offset ? y->io->utc_offset(y->io->ctx) : 0);
+    int64_t cur = pump_now(y), diff = local - cur;
+    if (diff > -60 && diff < 60) {
+        return false;
+    }
+    int64_t day = local >= 0 ? local / 86400 : (local - 86399) / 86400;
+    int64_t sec = local - day * 86400;
+    int yr, mo, dd;
+    civil_from_days(day, &yr, &mo, &dd);
+    /* The two writes an app makes: the date, then the time. */
+    uint8_t d[4] = {(uint8_t)yr, (uint8_t)(yr >> 8), (uint8_t)mo, (uint8_t)dd};
+    set_clock(y, true, d, 4);
+    uint8_t t[3] = {(uint8_t)(sec / 3600), (uint8_t)(sec / 60 % 60), (uint8_t)(sec % 60)};
+    set_clock(y, false, t, 3);
+    y->st.clock_offset = 0; /* exactly the board's local time */
+    ylog(y, "pump clock set to local time %04d-%02d-%02d %02d:%02d (it was %lld min out)", yr, mo, dd,
+         (int)(sec / 3600), (int)(sec / 60 % 60), (long long)(diff / 60));
+    save(y);
+    return true;
 }
 
 /* A protected command's plaintext, once it arrived whole and decrypted. */

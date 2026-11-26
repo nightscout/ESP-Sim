@@ -38,7 +38,7 @@ typedef struct {
     bool extended;        /* verControl > 1.1: 15-byte bolus, 44-byte bolus status, extended bolus */
     bool index_safevar;   /* verHistory >= 1.2: entry indexes are SAFEVARs, else bare u16 */
     uint8_t status_len;   /* GetSystemStatus: 20 (with CRC) or 18 */
-    uint8_t tbr_step;     /* percent */
+    uint8_t tbr_step;     /* percent: 1 with OPN_CAPS (PumpBase 1.1-1.2), else 10 */
 } ypso_fw_info_t;
 
 const ypso_fw_info_t *ypso_fw(ypso_fw_t fw);
@@ -193,6 +193,7 @@ typedef struct {
      * has these zero, and ypso_init fills them in. */
     uint8_t server_priv[32];   /* the server key this pump trusts, made at random on the board */
     uint64_t kx_counter;       /* the last key exchange's counter: the next must be greater */
+    uint32_t tbr_seq;          /* the running temp basal's history entry (its _RUNNING record) */
 } ypso_state_t;
 
 typedef struct {
@@ -250,6 +251,10 @@ void ypso_set_suspended(ypso_t *y, bool on);
  * password, so an app with no credentials for it works at once. Closed: like
  * a real pump, only its own password. */
 void ypso_set_open(ypso_t *y, bool open);
+/* Set the pump's clock to the board's local time, as a person would on the
+ * pump: a date and a time change in its history (stamped on the clock as it
+ * was), only if it is a minute or more out. True if it moved. */
+bool ypso_clock_to_local(ypso_t *y);
 void ypso_reboot(ypso_t *y);   /* the pump restarts: its reboot counter goes up */
 size_t ypso_status_json(ypso_t *y, char *out, size_t cap);
 /* The advertised name: "YpsoPump_<serial>". */

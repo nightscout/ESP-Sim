@@ -1259,6 +1259,14 @@ static void test_patterns(void)
     cgm_state_migrate(&old);
     CHECK(old.version == CGM_STATE_VERSION && old.pattern == CGM_PATTERN_PERSON);
     CHECK(old.amplitude == 50 && old.period_minutes == 240);
+    /* A version 1 save from a build that kept something else there (ESP-Sim's
+     * G6 receiver-slot seq): the defaults, not those bytes. */
+    old = saved;
+    old.version = 1;
+    old.amplitude = 523;
+    old.period_minutes = 0;
+    cgm_state_migrate(&old);
+    CHECK(old.amplitude == 50 && old.period_minutes == 240 && strcmp(old.id, saved.id) == 0);
 
     /* The first OK reading after warm-up sits behind a warm-up entry with no
      * glucose. It must report no trend, not one faked from the walk's 120
@@ -1414,6 +1422,40 @@ static void test_person(void)
     person_days(CGM_INSULIN_PUMP, 1, &lo, &hi, &mean, &sd, &tir, &below, &changes, false);
     printf("  person, no insulin, 1 day: %d-%d mg/dL, mean %.0f\n", lo, hi, mean);
     CHECK(hi >= 390);
+
+    /* The panel's Set moves the person's own glucose: the readings carry on
+     * from it, not from where the person was (stuck high above 400), and the
+     * person keeps running. */
+    {
+        static cgm_t c;
+        static cgm_io_t io;
+        io = fio;
+        io.utc_offset = f_utc;
+        io.pump_insulin = f_pump;
+        memset(&fk, 0, sizeof fk);
+        fk.now = 1800000000;
+        pump_total = 0;
+        cgm_state_t st;
+        cgm_state_fresh(&st, CGM_G6, NULL, fk.now);
+        cgm_init(&c, &st, &io);
+        cgm_skip_warmup(&c);
+        cgm_set_person(&c, CGM_INSULIN_PUMP, 45, 10, 80);
+        c.st.person.g_milli = 598000;
+        cgm_set_glucose(&c, 120, 0);
+        CHECK(c.st.person.g_milli == 120000);
+        CHECK(c.st.pattern == CGM_PATTERN_PERSON);
+        uint32_t seen = c.st.n_hist ? c.st.hist[c.st.n_hist - 1].seq : 0;
+        int got = 0;
+        for (int s = 0; s < 20 * 60 && !got; s++) {
+            fk.now++;
+            cgm_tick(&c);
+            if (c.st.n_hist && c.st.hist[c.st.n_hist - 1].seq != seen && c.st.hist[c.st.n_hist - 1].glucose) {
+                got = c.st.hist[c.st.n_hist - 1].glucose;
+            }
+        }
+        printf("  person set to 120 from 598: next reading %d mg/dL\n", got);
+        CHECK(got > 80 && got < 180);
+    }
 
     /* The food names. */
     CHECK(strcmp(cgm_food_name(0), "porridge with banana") == 0);

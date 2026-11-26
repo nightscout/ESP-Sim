@@ -1,0 +1,9 @@
+# ESP-Sim's flash: two app slots for firmware over Wi-Fi (/ota).
+# nvs and phy_init stay where the single-app layout had them, so the saved
+# pod, YpsoPump, CGM, Bluetooth bonds and Wi-Fi survive the change.
+# Name,    Type, SubType, Offset,   Size
+nvs,       data, nvs,     0x9000,   0x6000
+phy_init,  data, phy,     0xf000,   0x1000
+otadata,   data, ota,     0x10000,  0x2000
+ota_0,     app,  ota_0,   0x20000,  0x300000
+ota_1,     app,  ota_1,   0x320000, 0x300000

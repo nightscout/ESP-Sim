@@ -86,6 +86,7 @@ void ypso_app_on_disconnect(void);
 int ypso_app_on_read(ypso_chr_t c, uint8_t *out, size_t cap, size_t *len);
 int ypso_app_on_write(ypso_chr_t c, const uint8_t *p, size_t n);
 size_t ypso_app_status_json(char *out, size_t cap);
+size_t ypso_app_history_text(char *out, size_t cap, int max); /* newest first, as text */
 uint32_t ypso_app_delivered(void); /* hundredths of a unit, ever */
 /* POST /ypso. Returns NULL, or what was wrong; *reply, when set, is the JSON answer. */
 const char *ypso_app_command(const char *body, char *reply, size_t cap);
@@ -123,3 +124,12 @@ void panel_restart_soon(void);
 /* dns.c: the captive portal's DNS responder, started and stopped with the AP. */
 void dns_start(void);
 void dns_stop(void);
+
+/* remote.c: the log at GET /log and new firmware at POST /ota, over Wi-Fi. */
+void remote_log_init(void); /* first thing at boot: keeps the log's last 32 KB */
+void remote_start(void *httpd_server);
+void ypso_app_clock_changed(void); /* the board's time or zone changed: the pump follows */
+bool store_load_clock(int64_t *t);
+void store_save_clock(int64_t t);
+bool store_load_tz(char tz[64]);
+void store_save_tz(const char *tz);

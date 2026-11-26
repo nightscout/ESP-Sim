@@ -315,6 +315,33 @@ async function refreshBoard(){
 async function reboot(){ try { const r = await fetch('/settings/reboot',{method:'POST'}); if(!r.ok) throw new Error((await r.text()).trim()); say('Rebooting…'); } catch(e){ say('Failed — '+e.message); } }
 $('reboot').onclick = ()=>{ if(confirm('Reboot the board? It comes back with the same state.')) reboot(); };
 
+/* The board keeps the local time of wherever its panel is opened: the browser's
+ * zone, as a POSIX TZ (offsets, and the DST rule found from this year's changes). */
+function posixTZ(){
+  const y = new Date().getFullYear(), off = t => -new Date(t).getTimezoneOffset();
+  const jan = off(Date.UTC(y,0,1)), jul = off(Date.UTC(y,6,1)), std = Math.min(jan,jul), dst = Math.max(jan,jul);
+  const fmt = m => { const w = -m, a = Math.abs(w); return (w<0?'-':'')+Math.floor(a/60)+(a%60?':'+String(a%60).padStart(2,'0'):''); };
+  if (std === dst) return 'LST'+fmt(std);
+  const tr = []; let prev = off(Date.UTC(y,0,1));
+  for (let d = 1; d <= 366; d++) {
+    const t = Date.UTC(y,0,1) + d*864e5, o = off(t);
+    if (o !== prev) {
+      let lo = t - 864e5, hi = t;
+      while (hi - lo > 60e3) { const mid = Math.floor((lo+hi)/120e3)*60e3; if (off(mid) === prev) lo = mid; else hi = mid; }
+      tr.push({at:hi, from:prev, to:o}); prev = o;
+    }
+  }
+  const rule = x => { if (!x) return ''; const l = new Date(x.at + x.from*60e3), mo = l.getUTCMonth()+1, day = l.getUTCDate();
+    const dim = new Date(Date.UTC(l.getUTCFullYear(), mo, 0)).getUTCDate(), wk = day+7 > dim ? 5 : Math.ceil(day/7);
+    const s = l.getUTCHours()*60 + l.getUTCMinutes();
+    return 'M'+mo+'.'+wk+'.'+l.getUTCDay()+'/'+Math.floor(s/60)+(s%60?':'+String(s%60).padStart(2,'0'):''); };
+  return 'LST'+fmt(std)+'LDT'+(dst-std !== 60 ? fmt(dst) : '')+','+rule(tr.find(x=>x.to===dst))+','+rule(tr.find(x=>x.to===std));
+}
+(async ()=>{ try {
+  const want = posixTZ(), have = (await (await fetch('/tz')).json()).tz;
+  if (want && have !== want) await fetch('/tz', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tz:want})});
+} catch(e){} })();
+
 /* ---- CGM ---- */
 const CGM_STATES = {1:'Stopped',2:'Warm-up',6:'OK',16:'Session failed',18:'Temporary issue',24:'Expired',25:'Sensor failed',26:'Session ended'};
 const KINDS = {0:'No CGM',6:'Dexcom G6',7:'Dexcom G7'};

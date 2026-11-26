@@ -10,6 +10,7 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "app.h"
@@ -60,8 +61,32 @@ static const ypso_io_t io = {
 
 static void tick_task(void *arg)
 {
+    /* The zone's offset (a new zone from the panel, or daylight saving): the
+     * pump's clock keeps its time across the change, then is set to the new
+     * local time as a person would, so the change is in its history. */
+    int32_t known = utc_offset(NULL);
+    time_t last = time(NULL);
     for (;;) {
-        LOCKED(ypso_tick(&pump));
+        int32_t off = utc_offset(NULL);
+        time_t now = time(NULL);
+        LOCKED({
+            /* The board's clock going back (network time after a restart from
+             * a save that was ahead): a real pump's clock never jumps back by
+             * itself, so it keeps its time and is then set back, with the
+             * change in its history. Forward is the time the board was off. */
+            if (now < last - 5) {
+                ESP_LOGW(TAG, "the board's clock went back %lld s", (long long)(last - now));
+                pump.st.clock_offset += last - now;
+                ypso_clock_to_local(&pump);
+            }
+            if (off != known) {
+                pump.st.clock_offset += known - off;
+                known = off;
+                ypso_clock_to_local(&pump);
+            }
+            ypso_tick(&pump);
+        });
+        last = now;
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -78,6 +103,23 @@ void ypso_app_start(void)
     ypso_init(&pump, &st, &io);
     store_save_ypso(NULL, &pump.st); /* keeps a server key made for an older save */
     ypso_set_open(&pump, store_load_ypso_open());
+    /* A real pump's clock runs on its battery. The board's may have restarted
+     * from a save older than the pump's newest entry: never before that. */
+    if (pump.st.n_events) {
+        const ypso_event_t *e = &pump.st.events[pump.st.n_events - 1];
+        int64_t newest = (int64_t)e->t + 946684800LL - utc_offset(NULL) - pump.st.clock_offset;
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        if (newest >= tv.tv_sec) {
+            tv.tv_sec = (time_t)newest + 1;
+            tv.tv_usec = 0;
+            settimeofday(&tv, NULL);
+            ESP_LOGW(TAG, "the board's clock was behind the pump's newest history entry: moved up to it");
+        }
+    }
+    if (time(NULL) > 1750000000) { /* the board knows the time (it survives a restart) */
+        ypso_clock_to_local(&pump);
+    }
     char name[24];
     ypso_name(&st, name);
     ESP_LOGW(TAG, "simulating %s, firmware %s: delivers nothing, for test phones only", name, ypso_fw(st.fw)->master);
@@ -115,11 +157,43 @@ int ypso_app_on_write(ypso_chr_t c, const uint8_t *p, size_t n)
     return rc;
 }
 
+/* The board's clock or zone changed: the pump keeps local time. */
+void ypso_app_clock_changed(void)
+{
+    if (mu) {
+        LOCKED(ypso_clock_to_local(&pump));
+    }
+}
+
 uint32_t ypso_app_delivered(void)
 {
     uint32_t v;
     LOCKED(v = pump.st.delivered_total);
     return v;
+}
+
+/* The newest `max` event-log entries as text, newest first, as a phone reads
+ * them (index 0 the newest): for /ypsohistory. */
+size_t ypso_app_history_text(char *out, size_t cap, int max)
+{
+    size_t n = 0;
+    if (!mu) {
+        return (size_t)snprintf(out, cap, "no YpsoPump\n");
+    }
+    xSemaphoreTake(mu, portMAX_DELAY);
+    n += (size_t)snprintf(out + n, cap - n, "%u entries, newest seq %lu; index seq type stamp(pump wall) v0 v1 v2\n",
+                          (unsigned)pump.st.n_events, (unsigned long)pump.st.event_seq);
+    for (int i = 0; i < max && i < pump.st.n_events && n + 80 < cap; i++) {
+        const ypso_event_t *e = &pump.st.events[pump.st.n_events - 1 - i];
+        time_t w = (time_t)e->t + 946684800;
+        struct tm tm;
+        gmtime_r(&w, &tm);
+        n += (size_t)snprintf(out + n, cap - n, "%3d %6lu %3u %04d-%02d-%02d %02d:%02d:%02d %u %u %u\n", i,
+                              (unsigned long)e->seq, e->type, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                              tm.tm_min, tm.tm_sec, e->v[0], e->v[1], e->v[2]);
+    }
+    xSemaphoreGive(mu);
+    return n;
 }
 
 size_t ypso_app_status_json(char *out, size_t cap)

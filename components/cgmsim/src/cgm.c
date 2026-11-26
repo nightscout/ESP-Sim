@@ -299,12 +299,10 @@ void cgm_state_migrate(cgm_state_t *st)
      * parameters. The patterns are numbered so the old values still mean the
      * same thing (FIXED 0, PERSON 1), so only the new fields need defaults. */
     if (st->version <= 1) {
-        if (st->amplitude == 0) {
-            st->amplitude = 50;
-        }
-        if (st->period_minutes == 0) {
-            st->period_minutes = 240;
-        }
+        /* Whatever a version 1 save holds there is not these fields (another
+         * build kept its own there), so they start at their defaults. */
+        st->amplitude = 50;
+        st->period_minutes = 240;
     }
     st->version = CGM_STATE_VERSION;
 }
@@ -965,9 +963,18 @@ size_t cgm_on_read(cgm_t *c, cgm_session_t session, cgm_chr_t chr, uint8_t *out,
 
 void cgm_set_glucose(cgm_t *c, uint16_t glucose, int8_t trend)
 {
-    c->st.pattern = CGM_PATTERN_FIXED;
     c->st.glucose = glucose < 40 ? 40 : glucose > 400 ? 400 : glucose;
     c->st.trend = trend;
+    if (c->st.pattern == CGM_PATTERN_PERSON) {
+        /* The virtual person's own glucose moves there and carries on from it
+         * (their meals, insulin on board and the rest unchanged): otherwise the
+         * next reading would put it straight back. */
+        c->st.person.g_milli = (int64_t)c->st.glucose * 1000;
+        c->st.person.noise = 0;
+        logf_(c, "the person's glucose set to %u mg/dL", (unsigned)c->st.glucose);
+    } else {
+        c->st.pattern = CGM_PATTERN_FIXED;
+    }
     save(c);
 }
 

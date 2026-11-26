@@ -30,6 +30,9 @@
 #include "ypso.h"
 
 void ble_store_config_init(void);
+int ble_store_config_read(int obj_type, const union ble_store_key *key, union ble_store_value *val);
+int ble_store_config_write(int obj_type, const union ble_store_value *val);
+int ble_store_config_delete(int obj_type, const union ble_store_key *key);
 
 static const char *TAG = "ble";
 
@@ -763,6 +766,124 @@ static void security_for(bool pump_link)
     ble_hs_cfg.sm_their_key_dist = display ? BLE_SM_PAIR_KEY_DIST_ID : BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 }
 
+/* ---- one bond store, two devices --------------------------------------------------------
+ *
+ * The board is two Bluetooth devices, the pump and the CGM, but NimBLE keeps
+ * one bond per remote device, found by its address alone. A watch bonded to
+ * both (the pump by passkey, the G6 Just Works) would have one bond replace
+ * the other, and NimBLE refuses to replace a passkey bond with a weaker one.
+ * So the CGM's bonds are kept under the remote address with a mark in its
+ * type byte: the store holds both, and each link finds its own. Which device
+ * a lookup is for: the link to that remote device that is not yet encrypted
+ * (pairing and reconnecting both happen there), else the only link to it. */
+#define CGM_NS 0x10
+static int store_ns_force = -1; /* -1: from the links; 0: the pump's; 1: the CGM's */
+
+static bool conn_peer(uint16_t conn, const ble_addr_t *a, bool *encrypted)
+{
+    struct ble_gap_conn_desc d;
+    if (conn == BLE_HS_CONN_HANDLE_NONE || ble_gap_conn_find(conn, &d) != 0) {
+        return false;
+    }
+    *encrypted = d.sec_state.encrypted;
+    return ble_addr_cmp(&d.peer_id_addr, a) == 0 || ble_addr_cmp(&d.peer_ota_addr, a) == 0;
+}
+
+static bool for_cgm(const ble_addr_t *a)
+{
+    if (store_ns_force >= 0) {
+        return store_ns_force == 1;
+    }
+    bool pe = false, ce = false, c = false;
+    bool p = conn_peer(pod_conn, a, &pe);
+    /* The CGM may hold two links (one per central): the device is the CGM's
+     * if any of them is to it. */
+    uint16_t links[CGM_MAX_SESSIONS];
+    xSemaphoreTake(cgm_mu, portMAX_DELAY);
+    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
+        links[i] = cgm_links[i].used ? cgm_links[i].handle : BLE_HS_CONN_HANDLE_NONE;
+    }
+    xSemaphoreGive(cgm_mu);
+    for (int i = 0; i < CGM_MAX_SESSIONS && !c; i++) {
+        bool e = false;
+        if (conn_peer(links[i], a, &e)) {
+            c = true;
+            ce = e;
+        }
+    }
+    if (p && c) {
+        return !ce && pe; /* both: the one still being secured */
+    }
+    return c;
+}
+
+static bool keyed(int t)
+{
+    return t == BLE_STORE_OBJ_TYPE_OUR_SEC || t == BLE_STORE_OBJ_TYPE_PEER_SEC || t == BLE_STORE_OBJ_TYPE_CCCD;
+}
+
+static ble_addr_t *key_addr(int t, union ble_store_key *k)
+{
+    return t == BLE_STORE_OBJ_TYPE_CCCD ? &k->cccd.peer_addr : &k->sec.peer_addr;
+}
+
+static ble_addr_t *val_addr(int t, union ble_store_value *v)
+{
+    return t == BLE_STORE_OBJ_TYPE_CCCD ? &v->cccd.peer_addr : &v->sec.peer_addr;
+}
+
+static int split_read(int t, const union ble_store_key *key, union ble_store_value *val)
+{
+    if (!keyed(t)) {
+        return ble_store_config_read(t, key, val);
+    }
+    union ble_store_key k = *key;
+    ble_addr_t *a = key_addr(t, &k);
+    if (ble_addr_cmp(a, BLE_ADDR_ANY) != 0 && for_cgm(a)) {
+        a->type |= CGM_NS;
+    }
+    int rc = ble_store_config_read(t, &k, val);
+    if (t != BLE_STORE_OBJ_TYPE_CCCD && ble_addr_cmp(key_addr(t, (union ble_store_key *)key), BLE_ADDR_ANY) != 0) {
+        ESP_LOGI(TAG, "bond lookup (%s) for ..%02X in the %s's: %s%s", t == BLE_STORE_OBJ_TYPE_OUR_SEC ? "ours" : "theirs",
+                 a->val[0], (a->type & CGM_NS) ? "CGM" : "pump", rc == 0 ? "found" : "none",
+                 rc == 0 && val->sec.authenticated ? ", authenticated" : "");
+    }
+    if (rc == 0) {
+        val_addr(t, val)->type &= ~CGM_NS;
+    }
+    return rc;
+}
+
+static int split_write(int t, const union ble_store_value *val)
+{
+    if (!keyed(t)) {
+        return ble_store_config_write(t, val);
+    }
+    union ble_store_value v = *val;
+    ble_addr_t *a = val_addr(t, &v);
+    if (for_cgm(a)) {
+        a->type |= CGM_NS;
+    }
+    if (t != BLE_STORE_OBJ_TYPE_CCCD) {
+        ESP_LOGI(TAG, "bond kept (%s) for ..%02X in the %s's", t == BLE_STORE_OBJ_TYPE_OUR_SEC ? "ours" : "theirs",
+                 a->val[0], (a->type & CGM_NS) ? "CGM" : "pump");
+    }
+    return ble_store_config_write(t, &v);
+}
+
+static int split_delete(int t, const union ble_store_key *key)
+{
+    if (!keyed(t)) {
+        return ble_store_config_delete(t, key);
+    }
+    union ble_store_key k = *key;
+    ble_addr_t *a = key_addr(t, &k);
+    if (ble_addr_cmp(a, BLE_ADDR_ANY) != 0 && for_cgm(a)) {
+        a->type |= CGM_NS;
+    }
+    return ble_store_config_delete(t, &k);
+}
+
 /* Like the real pump: bonds with up to 5 devices, the oldest forgotten when a
  * sixth pairs (the CGM's bonds are its own and not counted here). */
 #define YPSO_MAX_PEERS 5
@@ -788,7 +909,9 @@ static void ypso_note_peer(uint16_t conn)
     while (n > YPSO_MAX_PEERS) {
         ble_addr_t old = {.type = list[0]};
         memcpy(old.val, list + 1, 6);
+        store_ns_force = 0; /* the pump's bond only */
         ble_store_util_delete_peer(&old);
+        store_ns_force = -1;
         ESP_LOGI(TAG, "a sixth device bonded: the oldest bond forgotten");
         memmove(list, list + 7, 7 * --n);
     }
@@ -810,6 +933,8 @@ static int pod_gap_event(struct ble_gap_event *event, void *arg)
                 push(DASH_EV_CONNECTED, NULL, 0);
             }
         } else {
+            ESP_LOGW(TAG, "a connection to the %s did not come up (status %d)", ypso_mode ? "YpsoPump" : "pod",
+                     event->connect.status);
             pod_advertise_now();
         }
         break;
@@ -837,6 +962,14 @@ static int pod_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "pump link encryption %s (status %d)", event->enc_change.status == 0 ? "on" : "failed",
                  event->enc_change.status);
         passkey_shown = -1;
+        if (event->enc_change.status == 0) {
+            struct ble_gap_conn_desc d;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0) {
+                ESP_LOGI(TAG, "pump link security: authenticated %d, bonded %d, key %u bytes, device ..%02X",
+                         d.sec_state.authenticated, d.sec_state.bonded, (unsigned)d.sec_state.key_size,
+                         d.peer_id_addr.val[0]);
+            }
+        }
         if (ypso_mode && event->enc_change.status == 0) {
             ypso_note_peer(event->enc_change.conn_handle);
         }
@@ -867,9 +1000,15 @@ static int pod_gap_event(struct ble_gap_event *event, void *arg)
             event->subscribe.attr_handle == o5_data_handle) {
             ESP_LOGI(TAG, "%s notifications %s", event->subscribe.attr_handle == cmd_handle ? "CMD" : "DATA",
                      event->subscribe.cur_notify ? "on" : "off");
+        } else if (ypso_mode) {
+            ESP_LOGI(TAG, "pump link: notifications on handle %u %s", event->subscribe.attr_handle,
+                     event->subscribe.cur_notify || event->subscribe.cur_indicate ? "on" : "off");
         }
         break;
     default:
+        if (ypso_mode) {
+            ESP_LOGI(TAG, "pump link event %d", event->type);
+        }
         break;
     }
     return 0;
@@ -881,9 +1020,30 @@ static int cgm_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             security_for(false);
+            ESP_LOGI(TAG, "CGM link security config: io %u, mitm %u, sc %u, sc_only %u, level %u, bonding %u",
+                     ble_hs_cfg.sm_io_cap, ble_hs_cfg.sm_mitm, ble_hs_cfg.sm_sc, ble_hs_cfg.sm_sc_only,
+                     ble_hs_cfg.sm_sec_lvl, ble_hs_cfg.sm_bonding);
             cgm_link_up(event->connect.conn_handle);
+        } else {
+            ESP_LOGW(TAG, "a connection to the CGM did not come up (status %d)", event->connect.status);
+            cgm_advertise_now();
         }
         break;
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        /* 0x205 later means the device's key is not the one kept here: it must pair again. */
+        ESP_LOGI(TAG, "CGM link encryption %s (status %d)", event->enc_change.status == 0 ? "on" : "failed",
+                 event->enc_change.status);
+        break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* A device bonded to the CGM pairs again (its key was lost): forget the
+         * CGM's old bond for it, not its pump bond (split_delete), and go on. */
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+        }
+        ESP_LOGI(TAG, "a device pairs with the CGM again: its old CGM bond forgotten");
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "CGM link closed (handle 0x%04x, reason 0x%x)", event->disconnect.conn.conn_handle,
                  event->disconnect.reason);
@@ -945,6 +1105,12 @@ static int medtrum_gap_event(struct ble_gap_event *event, void *arg)
 
 static void on_sync(void)
 {
+    /* The bond store split (split_read). Here, not at init: the host's
+     * privacy setup runs ble_store_config_init again as it starts, which puts
+     * the plain store back. */
+    ble_hs_cfg.store_read_cb = split_read;
+    ble_hs_cfg.store_write_cb = split_write;
+    ble_hs_cfg.store_delete_cb = split_delete;
     ble_hs_util_ensure_addr(0);
     ble_hs_id_infer_auto(0, &own_addr_type);
     uint8_t addr[6] = {0};
@@ -1023,9 +1189,18 @@ int32_t ble_passkey(void)
     return passkey_shown;
 }
 
+/* The pump's bonds only: the CGM's are kept (the panel's YpsoPump card). */
 void ble_forget_bonds(void)
 {
-    ble_store_clear();
+    uint8_t list[7 * YPSO_MAX_PEERS];
+    size_t n = store_load_ypso_peers(list, sizeof list) / 7;
+    store_ns_force = 0;
+    for (size_t i = 0; i < n; i++) {
+        ble_addr_t a = {.type = list[7 * i]};
+        memcpy(a.val, list + 7 * i + 1, 6);
+        ble_store_util_delete_peer(&a);
+    }
+    store_ns_force = -1;
     store_save_ypso_peers(NULL, 0);
 }
 
