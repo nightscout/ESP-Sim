@@ -369,12 +369,13 @@ static void test_ypso_clear(void)
     CHECK(ph_write(&ph, YC_START_STOP_BOLUS, sv, 8) == 0);
     run(&y, 30);
     CHECK(ph_read(&ph, YC_GET_BOLUS_STATUS, v, &n) == 0 && le32(v + 1) == 100 && le32(v + 5) == 100);
-    /* OPN TBR steps are 10 %. */
+    /* PumpBase 1.1 has OPN_CAPS: TBR steps of 1 %, as rockit and the Kotlin
+     * reference send them (a 10 % step refused the AID's 235 %). */
+    CHECK(ypso_fw(YPSO_FW_V65)->tbr_step == 1 && ypso_fw(YPSO_FW_V03)->tbr_step == 1);
+    CHECK(ypso_fw(YPSO_FW_V02)->tbr_step == 10);
     uint8_t t[16];
-    safevar(t, 155);
-    safevar(t + 8, 30);
-    CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == YPSO_VALUE_INVALID);
     safevar(t, 150);
+    safevar(t + 8, 30);
     CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == 0);
     /* History 1.1: a bare u16 index. */
     uint8_t idx[2] = {0, 0};
@@ -421,6 +422,12 @@ static void test_ypso_open(void)
     uint8_t wrong[16] = {0};
     CHECK(ypso_on_write(&y, YC_AUTH_PASSWORD, wrong, 16) == 0);
     CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == 0);
+    /* OPN_CAPS: a temp basal in 1 % steps, as the AID sends it. */
+    uint8_t t[16];
+    safevar(t, 235);
+    safevar(t + 8, 30);
+    CHECK(ph_write(&ph, YC_START_STOP_TBR, t, 16) == 0);
+    CHECK(ph_read(&ph, YC_GET_SYSTEM_STATUS, v, &n) == 0 && le32(v + 10) == 235);
     ypso_set_open(&y, false);
     ypso_on_disconnect(&y);
     ypso_on_connect(&y);

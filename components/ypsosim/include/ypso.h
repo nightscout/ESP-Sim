@@ -38,7 +38,7 @@ typedef struct {
     bool extended;        /* verControl > 1.1: 15-byte bolus, 44-byte bolus status, extended bolus */
     bool index_safevar;   /* verHistory >= 1.2: entry indexes are SAFEVARs, else bare u16 */
     uint8_t status_len;   /* GetSystemStatus: 20 (with CRC) or 18 */
-    uint8_t tbr_step;     /* percent */
+    uint8_t tbr_step;     /* percent: 1 with OPN_CAPS (PumpBase 1.1-1.2), else 10 */
 } ypso_fw_info_t;
 
 const ypso_fw_info_t *ypso_fw(ypso_fw_t fw);

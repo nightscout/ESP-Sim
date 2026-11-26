@@ -32,9 +32,9 @@ static const ypso_fw_info_t FW[YPSO_FW_COUNT] = {
     [YPSO_FW_V35] = {"V35.01.00 (encrypted, study firmware)", "1.2", "V35.01.00", "V01.02.03", "1.7", "1.4", "1.4",
                      "1.0", true, true, true, true, true, 20, 1},
     [YPSO_FW_V65] = {"V65.00.06 (OPN, clear text, Control 1.0)", "1.1", "V65.00.06", "V01.00.00", "1.3", "1.1", "1.0",
-                     "", true, false, false, false, false, 18, 10},
+                     "", true, false, false, false, false, 18, 1},
     [YPSO_FW_V03] = {"V03.00.00 (OPN, clear text, Control 1.1)", "1.1", "V03.00.00", "V01.00.00", "1.5", "1.1", "1.1",
-                     "", true, false, false, false, false, 18, 10},
+                     "", true, false, false, false, false, 18, 1},
     [YPSO_FW_V02] = {"V02.00.00 (baseline, no Control service)", "1.0", "V02.00.00", "V01.00.00", "1.5", "1.1", "",
                      "", false, false, false, false, false, 18, 10},
 };
@@ -944,6 +944,7 @@ static int set_tbr(ypso_t *y, int32_t percent, int32_t minutes)
     int32_t longest = percent <= TBR_LONG_MAX ? TBR_LONG_MINUTES : TBR_SHORT_MINUTES;
     if (percent < 0 || percent > (TBR_LONG_MAX > TBR_SHORT_MAX ? TBR_LONG_MAX : TBR_SHORT_MAX) ||
         percent % f->tbr_step || minutes < 15 || minutes > longest || minutes % 15) {
+        ylog(y, "temp basal %d%% for %d min refused: off the pump's steps or limits", (int)percent, (int)minutes);
         return YPSO_VALUE_INVALID;
     }
     st->tbr_percent = percent;
