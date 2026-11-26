@@ -127,14 +127,6 @@ static void pod_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static void cgm_radio_task(void *arg)
-{
-    for (;;) {
-        ble_cgm_tick();
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
 void app_main(void)
 {
     remote_log_init();
@@ -171,7 +163,6 @@ void app_main(void)
         ble_start(pump, 0, NULL); /* the pod, or the Medtrum base */
     }
     cgm_app_start();
-    xTaskCreatePinnedToCore(cgm_radio_task, "cgmradio", 6144, NULL, 5, NULL, tskNO_AFFINITY);
     if (pump == PUMP_MEDTRUM) {
         medtrum_app_start();
     }

@@ -25,14 +25,10 @@ void ble_notify_data(void *ctx, const uint8_t *p, size_t n);
 void ble_disconnect(void *ctx);
 void ble_advertise(void *ctx, const dash_adv_t *adv);
 bool ble_connected(void);
-/* The cgm_io_t radio half, for the CGM's own advertising set and connection.
- * One core session per BLE link; the session token names the central. */
-void ble_cgm_send_session(cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n);
-void ble_cgm_disconnect_session(cgm_session_t session);
+/* The cgm_io_t radio half, for the CGM's own advertising set and connection. */
+void ble_cgm_send(void *ctx, cgm_chr_t chr, const uint8_t *p, size_t n);
+void ble_cgm_disconnect(void *ctx);
 void ble_cgm_advertise(void *ctx, bool on, const char *name, const uint8_t addr[6]);
-/* Called from a task: carries out a drained hang-up and applies the core's
- * advertising window (both are NimBLE host calls, so not under the core lock). */
-void ble_cgm_tick(void);
 
 /* ble.c: the Medtrum patch's radio half, the medtrum_io_t side. */
 bool ble_medtrum_next_event(void *ctx, medtrum_ev_t *ev, uint32_t timeout_ms);
@@ -42,14 +38,13 @@ void ble_medtrum_disconnect(void *ctx);
 void ble_medtrum_advertise(void *ctx, bool on, const uint8_t sn[4]);
 bool ble_medtrum_connected(void);
 
-/* cgm_app.c: the simulated Dexcom G6 or G7. The session token names the BLE
- * link the radio is talking about. */
+/* cgm_app.c: the simulated Dexcom G6 or G7. */
 void cgm_app_start(void);
-void cgm_app_on_connect_session(cgm_session_t session);
-void cgm_app_on_disconnect_session(cgm_session_t session);
-void cgm_app_on_subscribe_session(cgm_session_t session, cgm_chr_t chr, bool on);
-void cgm_app_on_write_session(cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n);
-size_t cgm_app_on_read_session(cgm_session_t session, cgm_chr_t chr, uint8_t *out, size_t cap);
+void cgm_app_on_connect(void);
+void cgm_app_on_disconnect(void);
+void cgm_app_on_subscribe(cgm_chr_t chr, bool on);
+void cgm_app_on_write(cgm_chr_t chr, const uint8_t *p, size_t n);
+size_t cgm_app_on_read(cgm_chr_t chr, uint8_t *out, size_t cap);
 size_t cgm_app_status_json(char *out, size_t cap);
 const char *cgm_app_command(const char *body); /* NULL, or what was wrong */
 

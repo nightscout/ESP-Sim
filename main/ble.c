@@ -84,43 +84,12 @@ static bool medtrum_mode;
 static uint8_t ypso_fw_id;
 static char ypso_adv_name[24];
 static int32_t passkey_shown = -1; /* -1: none waiting */
-static const char *const cgm_chr_names[CGM_CHR_COUNT] = {"comm", "control", "auth", "backfill"};
-
 static uint16_t cmd_handle, data_handle, o5_data_handle;
 static uint16_t dex_handle[CGM_CHR_COUNT];
 static uint16_t medtrum_read_handle, medtrum_write_handle;
 static volatile uint16_t pod_conn = BLE_HS_CONN_HANDLE_NONE;
+static volatile uint16_t cgm_conn = BLE_HS_CONN_HANDLE_NONE;
 static volatile uint16_t medtrum_conn = BLE_HS_CONN_HANDLE_NONE;
-
-/* The CGM's links: one core session per central, up to CGM_MAX_SESSIONS. The
- * core owns each central's login, deliveries and backfill cursor; the radio
- * maps a session token (the link's slot) to a connection handle. */
-typedef struct {
-    bool used;
-    uint16_t handle;
-    uint32_t gen;
-    int pending;                  /* frames queued by the core but not yet sent */
-    bool drop;                    /* the core asked to hang up; held for the queue */
-    uint16_t subs[CGM_CHR_COUNT]; /* the CCCD value per characteristic */
-} cgm_link_t;
-static cgm_link_t cgm_links[CGM_MAX_SESSIONS];
-static uint32_t cgm_gen_counter;
-static SemaphoreHandle_t cgm_mu; /* the links and the queue below */
-
-/* The CGM's notifications go through a queue and a task of their own: the core
- * calls ble_cgm_send_session from inside its own mutex, so buffer pressure is
- * waited out here, never while the core is locked. A hang-up the core asked for
- * waits until this queue has drained. */
-typedef struct {
-    cgm_session_t session;
-    uint16_t handle;
-    uint32_t gen;
-    uint8_t chr;
-    uint8_t len;
-    uint8_t data[32];
-} cgm_out_t;
-static QueueHandle_t cgm_out;
-static void cgm_send_task(void *arg);
 static volatile bool medtrum_status_notify;
 static uint8_t own_addr_type;
 static volatile bool synced;
@@ -132,13 +101,6 @@ static uint8_t adv_id[4], adv_pdm_id[4], adv_fault, adv_alerts;
 static bool cgm_adv_on;
 static char cgm_adv_name[16];
 static uint8_t cgm_adv_addr[6];
-/* What the radio last applied. NimBLE stops an extended advertising instance
- * when a connection completes, so the set must be re-armed even when the
- * core's window and payload have not changed. */
-static bool cgm_adv_applied_on;
-static bool cgm_adv_applied_valid;
-static char cgm_adv_applied_name[16];
-static uint8_t cgm_adv_applied_addr[6];
 static bool medtrum_adv_on;
 static uint8_t medtrum_adv_sn[4];
 
@@ -161,114 +123,6 @@ static void push_medtrum(uint8_t type, const uint8_t *data, size_t n)
     }
     if (xQueueSend(medtrum_events, &ev, 0) != pdTRUE) {
         ESP_LOGW(TAG, "Medtrum event queue full: a packet from the phone was dropped");
-    }
-}
-
-/* ---- the CGM's links (cgm_mu) ------------------------------------------- */
-
-static int cgm_slot_for_handle(uint16_t h)
-{
-    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
-        if (cgm_links[i].used && cgm_links[i].handle == h) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static cgm_link_t *cgm_link_for_session(cgm_session_t session)
-{
-    return session < CGM_MAX_SESSIONS && cgm_links[session].used ? &cgm_links[session] : NULL;
-}
-
-/* The session token a CGM connection is on, or CGM_MAX_SESSIONS when the
- * handle is not a CGM link (the pod's or the patch's). */
-static cgm_session_t cgm_session_for(uint16_t h)
-{
-    cgm_session_t s = CGM_MAX_SESSIONS;
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    int i = cgm_slot_for_handle(h);
-    if (i >= 0) {
-        s = (cgm_session_t)i;
-    }
-    xSemaphoreGive(cgm_mu);
-    return s;
-}
-
-/* How many CGM links are in use. The advertising set stays up while a slot
- * remains. */
-static int cgm_live_links(void)
-{
-    int n = 0;
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
-        n += cgm_links[i].used ? 1 : 0;
-    }
-    xSemaphoreGive(cgm_mu);
-    return n;
-}
-
-static void cgm_link_up(uint16_t h)
-{
-    int slot = -1;
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
-        if (!cgm_links[i].used) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot >= 0) {
-        memset(&cgm_links[slot], 0, sizeof cgm_links[slot]);
-        cgm_links[slot].used = true;
-        cgm_links[slot].handle = h;
-        cgm_links[slot].gen = ++cgm_gen_counter;
-    }
-    xSemaphoreGive(cgm_mu);
-    if (slot < 0) {
-        ESP_LOGW(TAG, "CGM: a third central; two links at a time, closing it");
-        ble_gap_terminate(h, BLE_ERR_REM_USER_CONN_TERM);
-        return;
-    }
-    ESP_LOGI(TAG, "cgm: session %d connected (handle 0x%04x)", slot, h);
-    cgm_app_on_connect_session((cgm_session_t)slot);
-}
-
-static void cgm_link_down(uint16_t h)
-{
-    cgm_session_t session = CGM_MAX_SESSIONS;
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    int slot = cgm_slot_for_handle(h);
-    if (slot >= 0) {
-        session = (cgm_session_t)slot;
-    }
-    xSemaphoreGive(cgm_mu);
-    /* Close the core session before the radio link goes: nothing new can be
-     * queued for a link the core no longer knows. */
-    if (session < CGM_MAX_SESSIONS) {
-        cgm_app_on_disconnect_session(session);
-    }
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    slot = cgm_slot_for_handle(h);
-    if (slot >= 0) {
-        memset(&cgm_links[slot], 0, sizeof cgm_links[slot]);
-    }
-    xSemaphoreGive(cgm_mu);
-}
-
-static void cgm_subscribe(uint16_t h, cgm_chr_t chr, uint16_t sub)
-{
-    cgm_session_t session = CGM_MAX_SESSIONS;
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    int slot = cgm_slot_for_handle(h);
-    if (slot >= 0) {
-        cgm_links[slot].subs[chr] = sub;
-        session = (cgm_session_t)slot;
-    }
-    xSemaphoreGive(cgm_mu);
-    if (session < CGM_MAX_SESSIONS) {
-        ESP_LOGI(TAG, "cgm: %s subscribe %s (handle 0x%04x)", cgm_chr_names[chr], sub ? "on" : "off", h);
-        cgm_app_on_subscribe_session(session, chr, sub != 0);
     }
 }
 
@@ -327,11 +181,10 @@ static int medtrum_write_access(uint16_t conn_handle, uint16_t attr_handle, stru
 static int dex_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     cgm_chr_t chr = (cgm_chr_t)(intptr_t)arg;
-    cgm_session_t session = cgm_session_for(conn_handle);
-    bool ours = session < CGM_MAX_SESSIONS;
+    bool ours = conn_handle == cgm_conn;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         uint8_t buf[32];
-        size_t n = ours ? cgm_app_on_read_session(session, chr, buf, sizeof buf) : 0;
+        size_t n = ours ? cgm_app_on_read(chr, buf, sizeof buf) : 0;
         return os_mbuf_append(ctxt->om, buf, n) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
@@ -341,15 +194,7 @@ static int dex_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gat
     uint16_t len = 0;
     int rc = flat(ctxt->om, buf, sizeof buf, &len);
     if (rc == 0 && ours) {
-        if (chr == CGM_CHR_AUTH && len > 0 && buf[0] == 0x07) {
-            /* BondRequestTx: the transmitter starts BLE pairing. Just Works;
-             * without it the app waits at "bonding" for a pairing that never
-             * begins. */
-            ESP_LOGI(TAG, "cgm: bond request: starting Just Works pairing (handle 0x%04x)", conn_handle);
-            ble_gap_security_initiate(conn_handle);
-        }
-        ESP_LOGI(TAG, "cgm: %s write %u bytes (handle 0x%04x)", cgm_chr_names[chr], (unsigned)len, conn_handle);
-        cgm_app_on_write_session(session, chr, buf, len);
+        cgm_app_on_write(chr, buf, len);
     }
     return rc;
 }
@@ -366,9 +211,8 @@ static int gap_access(uint16_t conn_handle, uint16_t attr_handle, struct ble_gat
         return os_mbuf_append(ctxt->om, &appearance, 2) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     char name[16];
-    bool cgm_link = cgm_session_for(conn_handle) < CGM_MAX_SESSIONS;
     xSemaphoreTake(adv_mu, portMAX_DELAY);
-    if (cgm_link) {
+    if (conn_handle == cgm_conn) {
         strcpy(name, cgm_adv_name);
     } else if (ypso_mode) {
         strcpy(name, ypso_adv_name);
@@ -657,58 +501,38 @@ static void pod_advertise_now(void)
     adv_start(POD_INSTANCE, &fields, &rsp, NULL, pod_gap_event);
 }
 
-/* The core owns the CGM's advertising window (G6 continuous, G7 window, signal
- * loss, CGM off), but the radio decides whether a set can still accept a
- * central: with two links it stays up while a slot remains, and an app that
- * has just ended its session reconnects at once. NimBLE stops the instance
- * when a connection completes, so this is re-armed even when the window and
- * payload have not changed. */
 static void cgm_advertise_now(void)
 {
-    if (!synced) {
+    if (!synced || cgm_conn != BLE_HS_CONN_HANDLE_NONE) {
         return;
     }
-    int live = cgm_live_links();
     xSemaphoreTake(adv_mu, portMAX_DELAY);
-    bool on = cgm_adv_on && live < CGM_MAX_SESSIONS;
+    bool on = cgm_adv_on;
     char name[16];
     uint8_t addr[6];
     strcpy(name, cgm_adv_name);
     memcpy(addr, cgm_adv_addr, 6);
-    bool same = cgm_adv_applied_valid && on == cgm_adv_applied_on &&
-                strcmp(name, cgm_adv_applied_name) == 0 && memcmp(addr, cgm_adv_applied_addr, 6) == 0;
     xSemaphoreGive(adv_mu);
-
-    if (on) {
-        if (same && ble_gap_ext_adv_active(CGM_INSTANCE)) {
-            return; /* already advertising this */
+    if (!on) {
+        if (ble_gap_ext_adv_active(CGM_INSTANCE)) {
+            ble_gap_ext_adv_stop(CGM_INSTANCE);
         }
-        /* Like a Dexcom: the FEBC service and the name, in the advertisement. */
-        struct ble_hs_adv_fields fields = {0};
-        fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-        fields.uuids16 = &dex_adv_uuid;
-        fields.num_uuids16 = 1;
-        fields.uuids16_is_complete = 1;
-        fields.name = (const uint8_t *)name;
-        fields.name_len = strlen(name);
-        fields.name_is_complete = 1;
-        struct ble_hs_adv_fields rsp = {0};
-        rsp.name = (const uint8_t *)name;
-        rsp.name_len = strlen(name);
-        rsp.name_is_complete = 1;
-        adv_start(CGM_INSTANCE, &fields, &rsp, addr, cgm_gap_event);
-    } else if (ble_gap_ext_adv_active(CGM_INSTANCE)) {
-        ble_gap_ext_adv_stop(CGM_INSTANCE);
-    } else if (same) {
-        return; /* already off and unchanged */
+        return;
     }
-
-    xSemaphoreTake(adv_mu, portMAX_DELAY);
-    cgm_adv_applied_on = on;
-    cgm_adv_applied_valid = true;
-    strcpy(cgm_adv_applied_name, name);
-    memcpy(cgm_adv_applied_addr, addr, 6);
-    xSemaphoreGive(adv_mu);
+    /* Like a Dexcom: the FEBC service and the name, in the advertisement. */
+    struct ble_hs_adv_fields fields = {0};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids16 = &dex_adv_uuid;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+    fields.name = (const uint8_t *)name;
+    fields.name_len = strlen(name);
+    fields.name_is_complete = 1;
+    struct ble_hs_adv_fields rsp = {0};
+    rsp.name = (const uint8_t *)name;
+    rsp.name_len = strlen(name);
+    rsp.name_is_complete = 1;
+    adv_start(CGM_INSTANCE, &fields, &rsp, addr, cgm_gap_event);
 }
 
 /* The Medtrum base: the app scans for the name "MT" and reads the base
@@ -794,23 +618,8 @@ static bool for_cgm(const ble_addr_t *a)
     if (store_ns_force >= 0) {
         return store_ns_force == 1;
     }
-    bool pe = false, ce = false, c = false;
-    bool p = conn_peer(pod_conn, a, &pe);
-    /* The CGM may hold two links (one per central): the device is the CGM's
-     * if any of them is to it. */
-    uint16_t links[CGM_MAX_SESSIONS];
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
-        links[i] = cgm_links[i].used ? cgm_links[i].handle : BLE_HS_CONN_HANDLE_NONE;
-    }
-    xSemaphoreGive(cgm_mu);
-    for (int i = 0; i < CGM_MAX_SESSIONS && !c; i++) {
-        bool e = false;
-        if (conn_peer(links[i], a, &e)) {
-            c = true;
-            ce = e;
-        }
-    }
+    bool pe = false, ce = false;
+    bool p = conn_peer(pod_conn, a, &pe), c = conn_peer(cgm_conn, a, &ce);
     if (p && c) {
         return !ce && pe; /* both: the one still being secured */
     }
@@ -1019,11 +828,12 @@ static int cgm_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            cgm_conn = event->connect.conn_handle;
             security_for(false);
             ESP_LOGI(TAG, "CGM link security config: io %u, mitm %u, sc %u, sc_only %u, level %u, bonding %u",
                      ble_hs_cfg.sm_io_cap, ble_hs_cfg.sm_mitm, ble_hs_cfg.sm_sc, ble_hs_cfg.sm_sc_only,
                      ble_hs_cfg.sm_sec_lvl, ble_hs_cfg.sm_bonding);
-            cgm_link_up(event->connect.conn_handle);
+            cgm_app_on_connect();
         } else {
             ESP_LOGW(TAG, "a connection to the CGM did not come up (status %d)", event->connect.status);
             cgm_advertise_now();
@@ -1045,16 +855,14 @@ static int cgm_gap_event(struct ble_gap_event *event, void *arg)
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "CGM link closed (handle 0x%04x, reason 0x%x)", event->disconnect.conn.conn_handle,
-                 event->disconnect.reason);
-        cgm_link_down(event->disconnect.conn.conn_handle);
+        ESP_LOGI(TAG, "CGM link closed (reason 0x%x)", event->disconnect.reason);
+        cgm_conn = BLE_HS_CONN_HANDLE_NONE;
+        cgm_app_on_disconnect(); /* may advertise again */
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
         for (int c = 0; c < CGM_CHR_COUNT; c++) {
             if (event->subscribe.attr_handle == dex_handle[c]) {
-                uint16_t sub = (uint16_t)((event->subscribe.cur_notify ? 1 : 0) |
-                                          (event->subscribe.cur_indicate ? 2 : 0));
-                cgm_subscribe(event->subscribe.conn_handle, (cgm_chr_t)c, sub);
+                cgm_app_on_subscribe((cgm_chr_t)c, event->subscribe.cur_notify || event->subscribe.cur_indicate);
             }
         }
         break;
@@ -1143,12 +951,6 @@ void ble_start(uint8_t pump_mode, uint8_t fw, const char *ypso_name)
     events = xQueueCreate(64, sizeof(dash_ev_t));
     medtrum_events = xQueueCreate(16, sizeof(medtrum_ev_t));
     adv_mu = xSemaphoreCreateMutex();
-    cgm_mu = xSemaphoreCreateMutex();
-    /* Deep enough for a backfill burst (a dozen frames plus the records). */
-    cgm_out = xQueueCreate(64, sizeof(cgm_out_t));
-    if (!cgm_out || xTaskCreate(cgm_send_task, "cgmsend", 4096, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGW(TAG, "cgm: notification task unavailable; notifications will be dropped");
-    }
     ypso_mode = pump_mode == PUMP_YPSO;
     medtrum_mode = pump_mode == PUMP_MEDTRUM;
     ypso_fw_id = fw;
@@ -1285,144 +1087,17 @@ void ble_advertise(void *ctx, const dash_adv_t *adv)
 
 /* ---- the CGM: the radio half of cgm_io_t ---------------------------------------- */
 
-/* Sends one queued notification to the one session's link. The core emits one
- * send per session, so a phone and a watch each get their own frame. With a
- * dozen fragments queued, NimBLE can run short of buffers for a moment: wait
- * for one rather than lose a frame, without holding cgm_mu across the wait. */
-static void cgm_send_task(void *arg)
+void ble_cgm_send(void *ctx, cgm_chr_t chr, const uint8_t *p, size_t n)
 {
-    cgm_out_t m;
-    for (;;) {
-        if (xQueueReceive(cgm_out, &m, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        bool gone = false, not_sub = false, failed = false, no_buf = false;
-        for (int tries = 0; tries < 100; tries++) {
-            bool retry = false;
-            xSemaphoreTake(cgm_mu, portMAX_DELAY);
-            cgm_link_t *lk = cgm_link_for_session(m.session);
-            if (!lk || lk->gen != m.gen) {
-                gone = true;
-            } else if (lk->subs[m.chr] == 0) {
-                not_sub = true;
-            } else {
-                struct os_mbuf *om = ble_hs_mbuf_from_flat(m.data, m.len);
-                if (!om) {
-                    retry = true;
-                } else {
-                    int rc = (lk->subs[m.chr] & 1)
-                                 ? ble_gatts_notify_custom(m.handle, dex_handle[m.chr], om)
-                                 : ble_gatts_indicate_custom(m.handle, dex_handle[m.chr], om);
-                    if (rc == BLE_HS_ENOMEM) {
-                        retry = true;
-                    } else if (rc != 0) {
-                        failed = true;
-                    }
-                }
-            }
-            xSemaphoreGive(cgm_mu);
-            if (!retry) {
-                break;
-            }
-            if (tries == 99) {
-                no_buf = true;
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(5));
-            }
-        }
-        /* Release this frame's hold on the session's hang-up exactly once,
-         * whether it was sent, dropped or exhausted. */
-        xSemaphoreTake(cgm_mu, portMAX_DELAY);
-        cgm_link_t *lk = cgm_link_for_session(m.session);
-        if (lk && lk->gen == m.gen && lk->pending > 0) {
-            lk->pending--;
-        }
-        xSemaphoreGive(cgm_mu);
-        if (gone) {
-            continue;
-        }
-        if (not_sub) {
-            ESP_LOGI(TAG, "cgm: %s dropped: handle 0x%04x is no longer subscribed", cgm_chr_names[m.chr],
-                     m.handle);
-        } else if (no_buf) {
-            ESP_LOGW(TAG, "cgm: notification dropped: no buffers");
-        } else if (failed) {
-            ESP_LOGW(TAG, "cgm: notification to handle 0x%04x failed", m.handle);
-        }
-    }
+    notify(cgm_conn, dex_handle[chr], p, n);
 }
 
-/* Called by the core from inside its own mutex, with the session that asked for
- * this send: queue it for that session's link and return. If the session's link
- * has gone, or never subscribed, there is nobody to send to. A queued frame
- * counts against the session's hang-up until it has actually been sent. */
-void ble_cgm_send_session(cgm_session_t session, cgm_chr_t chr, const uint8_t *p, size_t n)
+void ble_cgm_disconnect(void *ctx)
 {
-    if (!cgm_out) {
-        return;
+    uint16_t c = cgm_conn;
+    if (c != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(c, BLE_ERR_REM_USER_CONN_TERM);
     }
-    if (n > sizeof(((cgm_out_t *)0)->data)) {
-        ESP_LOGW(TAG, "cgm: a %u-byte notification does not fit the queue; dropped", (unsigned)n);
-        return;
-    }
-    cgm_out_t m = {.session = session, .chr = (uint8_t)chr, .len = (uint8_t)n};
-    if (n) {
-        memcpy(m.data, p, n);
-    }
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    cgm_link_t *lk = cgm_link_for_session(session);
-    if (!lk || lk->subs[chr] == 0) {
-        xSemaphoreGive(cgm_mu);
-        return;
-    }
-    m.handle = lk->handle;
-    m.gen = lk->gen;
-    lk->pending++;
-    xSemaphoreGive(cgm_mu);
-    if (xQueueSend(cgm_out, &m, 0) != pdTRUE) {
-        xSemaphoreTake(cgm_mu, portMAX_DELAY);
-        lk = cgm_link_for_session(session);
-        if (lk && lk->gen == m.gen && lk->pending > 0) {
-            lk->pending--;
-        }
-        xSemaphoreGive(cgm_mu);
-        ESP_LOGW(TAG, "cgm: notification queue full: a message was dropped");
-    }
-}
-
-/* The core asks for a hang-up from inside its own mutex; mark it and let
- * ble_cgm_tick() carry it out once the queue has drained. */
-void ble_cgm_disconnect_session(cgm_session_t session)
-{
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    cgm_link_t *lk = cgm_link_for_session(session);
-    if (lk) {
-        lk->drop = true;
-    }
-    xSemaphoreGive(cgm_mu);
-}
-
-/* Drain-before-hangup: terminate a session only once the frames queued for it
- * have been sent, so an injected delay cannot close the link before its
- * reading has left the queue. Called from the core's tick, outside its lock. */
-void ble_cgm_tick(void)
-{
-    xSemaphoreTake(cgm_mu, portMAX_DELAY);
-    for (int i = 0; i < CGM_MAX_SESSIONS; i++) {
-        cgm_link_t *lk = &cgm_links[i];
-        if (!lk->used || !lk->drop || lk->pending > 0) {
-            continue;
-        }
-        uint16_t h = lk->handle;
-        lk->drop = false;
-        ESP_LOGI(TAG, "cgm: hanging up a drained session (handle 0x%04x)", h);
-        ble_gap_terminate(h, BLE_ERR_REM_USER_CONN_TERM);
-    }
-    xSemaphoreGive(cgm_mu);
-    /* Apply the core's window (io->advertise only records it, because it runs
-     * under the core mutex) and re-arm the set after a connect let NimBLE stop
-     * it. */
-    cgm_advertise_now();
 }
 
 void ble_cgm_advertise(void *ctx, bool on, const char *name, const uint8_t addr[6])
@@ -1430,10 +1105,9 @@ void ble_cgm_advertise(void *ctx, bool on, const char *name, const uint8_t addr[
     xSemaphoreTake(adv_mu, portMAX_DELAY);
     cgm_adv_on = on;
     strncpy(cgm_adv_name, name, sizeof cgm_adv_name - 1);
-    cgm_adv_name[sizeof cgm_adv_name - 1] = 0;
     memcpy(cgm_adv_addr, addr, 6);
     xSemaphoreGive(adv_mu);
-    ESP_LOGI(TAG, "cgm: %s as %s", on ? "advertising" : "not advertising", name);
+    cgm_advertise_now();
 }
 
 /* ---- the Medtrum base: the radio half of medtrum_io_t --------------------------- */
