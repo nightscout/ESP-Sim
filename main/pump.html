@@ -379,8 +379,12 @@
         toast('Failed — ' + e.message, true);
       }
     });
+    /* Which pump the board is. Asked until it answers: a page opened while the
+     * board restarts (after new firmware, say) otherwise showed no pump at all,
+     * as if none were chosen. */
     async function select(){
-      let s; try { s = await (await fetch('/settings/status')).json(); } catch(e){ return; }
+      let s; try { s = await (await fetch('/settings/status')).json(); }
+      catch(e){ setTimeout(select, 2000); return; }
       let p = 'pod-o5';
       if (s.pump === 1) p = 'ypso';
       else if (s.pump === 2) p = 'medtrum';
