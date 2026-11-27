@@ -182,8 +182,6 @@
     <div class="seg" id="cgmModeSel">
       <button type="button" data-mode="person">Virtual person</button>
       <button type="button" data-mode="fixed">Fixed</button>
-      <button type="button" data-mode="sine">Wave</button>
-      <button type="button" data-mode="walk">Walk</button>
     </div>
 
     <div class="subbox" id="modePerson" hidden>
@@ -214,25 +212,7 @@
       <div class="muted" style="margin-top:8px">One value with a trend; every reading repeats it. The glucose the app sees is this value.</div>
     </div>
 
-    <div class="subbox" id="modeSine" hidden>
-      <h3>Wave</h3>
-      <div class="row">
-        <div><label for="cgmMeanIn">Mean (40–400 mg/dL)</label><input type="number" id="cgmMeanIn" min="40" max="400" step="1"></div>
-        <div><label for="cgmAmplitudeIn">Amplitude (± mg/dL)</label><input type="number" id="cgmAmplitudeIn" min="0" max="180" step="1" value="50"></div>
-        <div><label for="cgmPeriodIn">Period (minutes)</label><input type="number" id="cgmPeriodIn" min="10" max="1440" step="1" value="240"></div>
-        <div style="flex:0"><button class="primary" id="cgmSineSet">Apply</button></div>
-      </div>
-      <div class="muted" style="margin-top:8px">A sine around the mean, clamped to 40–400 mg/dL. The trend comes from the reading itself.</div>
-    </div>
 
-    <div class="subbox" id="modeWalk" hidden>
-      <h3>Walk</h3>
-      <div class="row">
-        <div><label for="cgmWalkIn">Target (40–400 mg/dL)</label><input type="number" id="cgmWalkIn" min="40" max="400" step="1"></div>
-        <div style="flex:0"><button class="primary" id="cgmWalkSet">Apply</button></div>
-      </div>
-      <div class="muted" style="margin-top:8px">Each reading steps toward the target, so the app sees a slow approach and then a flat line at it.</div>
-    </div>
 
     <div class="muted" style="margin-top:12px">A reading every 5 minutes.</div>
   </section>
@@ -346,7 +326,7 @@ function posixTZ(){
 const CGM_STATES = {1:'Stopped',2:'Warm-up',6:'OK',16:'Session failed',18:'Temporary issue',24:'Expired',25:'Sensor failed',26:'Session ended'};
 const KINDS = {0:'No CGM',6:'Dexcom G6',7:'Dexcom G7'};
 let cgmEdited = {}, cgmStatus = null, cgmFetched = 0;
-['cgmGlucoseIn','cgmTrendIn','cgmMeanIn','cgmWalkIn','cgmStateIn','g6Id','cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn','cgmAmplitudeIn','cgmPeriodIn']
+['cgmGlucoseIn','cgmTrendIn','cgmStateIn','g6Id','cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn']
   .forEach(id=>{ const e=$(id); if(e) e.oninput=()=>cgmEdited[id]=true; });
 
 async function cgmSend(body, done){
@@ -377,15 +357,21 @@ $('cgmSkip').onclick = ()=>cgmSend({command:'cgmSkipWarmup'}, 'Warm-up skipped')
 $('cgmLoss').onchange = ()=>cgmSend({command:'cgmSignalLoss', on:$('cgmLoss').checked}, $('cgmLoss').checked ? 'Signal lost' : 'Signal back');
 
 /* The source box: the four ways to make glucose, each with its own settings. */
+/* This firmware's CGM makes glucose two ways (cgmPattern 0, fixed: the panel's value
+ * and trend; 1, the virtual person); the PR's wave and walk are not simulated. */
 document.querySelectorAll('#cgmModeSel button').forEach(b=>b.onclick=()=>{
-  const m = b.dataset.mode;
-  if(m==='person'){ sendPerson(); return; }
-  const body = {command:'cgmSetPattern', pattern:m};
-  if(m==='fixed'){ body.value = Math.round(+$('cgmGlucoseIn').value); body.trend = Math.round(+$('cgmTrendIn').value*10); }
-  if(m==='sine'){ body.value = Math.round(+$('cgmMeanIn').value); body.amplitude = Math.round(+$('cgmAmplitudeIn').value); body.periodMinutes = Math.round(+$('cgmPeriodIn').value); }
-  if(m==='walk'){ body.value = Math.round(+$('cgmWalkIn').value); }
-  cgmSend(body, 'Now simulating '+m);
+  if(b.dataset.mode==='person') sendPerson(); else sendFixed('Now a fixed glucose');
 });
+async function sendFixed(done){
+  cgmEdited.cgmGlucoseIn=cgmEdited.cgmTrendIn=false;
+  const src = cgmStatus ? cgmStatus.insulinSource|0 : 0;
+  try {
+    const r = await fetch('/cgm/command',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({command:'cgmPattern', pattern:0, source:src})});
+    if(!r.ok) throw new Error((await r.text()).trim());
+  } catch(e){ say('Failed — '+e.message); return; }
+  cgmSend({command:'cgmGlucose', glucose:Math.round(+$('cgmGlucoseIn').value), trend:Math.round(+$('cgmTrendIn').value*10)}, done);
+}
 function sendPerson(){
   ['cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn'].forEach(id=>cgmEdited[id]=false);
   cgmSend({command:'cgmPattern', pattern:1, source:+$('cgmSourceIn').value,
@@ -394,12 +380,7 @@ function sendPerson(){
 $('cgmPersonSet').onclick = ()=>{ ['cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn'].forEach(id=>cgmEdited[id]=false);
   cgmSend({command:'cgmPattern', pattern:1, source:+$('cgmSourceIn').value,
     isf:Math.round(+$('cgmIsfIn').value), icr:Math.round(+$('cgmIcrIn').value), basalNeed:Math.round(+$('cgmBasalIn').value*100)}, 'Applied'); };
-$('cgmFixedSet').onclick = ()=>{ cgmEdited.cgmGlucoseIn=cgmEdited.cgmTrendIn=false;
-  cgmSend({command:'cgmSetPattern', pattern:'fixed', value:Math.round(+$('cgmGlucoseIn').value), trend:Math.round(+$('cgmTrendIn').value*10)}, 'Fixed applied'); };
-$('cgmSineSet').onclick = ()=>{ cgmEdited.cgmMeanIn=cgmEdited.cgmAmplitudeIn=cgmEdited.cgmPeriodIn=false;
-  cgmSend({command:'cgmSetPattern', pattern:'sine', value:Math.round(+$('cgmMeanIn').value), amplitude:Math.round(+$('cgmAmplitudeIn').value), periodMinutes:Math.round(+$('cgmPeriodIn').value)}, 'Wave applied'); };
-$('cgmWalkSet').onclick = ()=>{ cgmEdited.cgmWalkIn=false;
-  cgmSend({command:'cgmSetPattern', pattern:'walk', value:Math.round(+$('cgmWalkIn').value)}, 'Walk applied'); };
+$('cgmFixedSet').onclick = ()=>sendFixed('Fixed applied');
 $('cgmSnack').onclick = ()=>cgmSend({command:'cgmEat', grams:20}, 'The person has a snack');
 $('cgmExercise').onclick = ()=>cgmSend({command:'cgmExercise', minutes:45}, 'The person goes for a run');
 
@@ -407,8 +388,6 @@ function modeView(kind){
   ['idle'].forEach(()=>{});
   $('modePerson').hidden = kind!=='person';
   $('modeFixed').hidden = kind!=='fixed';
-  $('modeSine').hidden = kind!=='sine';
-  $('modeWalk').hidden = kind!=='walk';
   document.querySelectorAll('#cgmModeSel button').forEach(b=>b.classList.toggle('active', b.dataset.mode===kind));
 }
 
@@ -443,18 +422,13 @@ function showCgm(c){
 function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
 
 function showPerson(c){
-  const kind = c.pattern || 'fixed';
+  const kind = c.pattern===1 || c.pattern==='person' ? 'person' : 'fixed'; /* 0 fixed, 1 the person */
   if(!cgmEdited.cgmSourceIn) $('cgmSourceIn').value = String(c.insulinSource);
   if(!cgmEdited.cgmIsfIn && document.activeElement!==$('cgmIsfIn')) $('cgmIsfIn').value = c.isf;
   if(!cgmEdited.cgmIcrIn && document.activeElement!==$('cgmIcrIn')) $('cgmIcrIn').value = c.icr;
   if(!cgmEdited.cgmBasalIn && document.activeElement!==$('cgmBasalIn')) $('cgmBasalIn').value = (c.basalNeed/100).toFixed(2);
-  if(!cgmEdited.cgmAmplitudeIn && document.activeElement!==$('cgmAmplitudeIn')) $('cgmAmplitudeIn').value = c.amplitude;
-  if(!cgmEdited.cgmPeriodIn && document.activeElement!==$('cgmPeriodIn')) $('cgmPeriodIn').value = c.periodMinutes;
-  /* each source keeps its own value: mean for wave, target for walk, value for fixed */
-  if(!cgmEdited.cgmMeanIn && document.activeElement!==$('cgmMeanIn') && kind==='sine') $('cgmMeanIn').value = c.glucose;
   if(!cgmEdited.cgmGlucoseIn && document.activeElement!==$('cgmGlucoseIn')) $('cgmGlucoseIn').value = c.glucose;
   if(!cgmEdited.cgmTrendIn && document.activeElement!==$('cgmTrendIn')) $('cgmTrendIn').value = c.trend/10;
-  if(!cgmEdited.cgmWalkIn && document.activeElement!==$('cgmWalkIn')) $('cgmWalkIn').value = c.glucose;
   modeView(kind);
   if(kind!=='person'){ $('cgmPersonInfo').textContent=''; return; }
   const parts = ['True glucose '+c.trueGlucose+' mg/dL', 'insulin on board '+c.iob.toFixed(2)+' U'];
