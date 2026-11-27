@@ -96,6 +96,19 @@ void store_save_wifi(const char *ssid, const char *password)
     nvs_commit(nvs);
 }
 
+uint8_t store_load_bt_epoch(void)
+{
+    uint8_t v = 0;
+    nvs_get_u8(nvs, "btEpoch", &v);
+    return v;
+}
+
+void store_save_bt_epoch(uint8_t epoch)
+{
+    nvs_set_u8(nvs, "btEpoch", epoch);
+    nvs_commit(nvs);
+}
+
 bool store_load_cgm(cgm_state_t *st)
 {
     /* A save from before the virtual person is shorter: its new fields load

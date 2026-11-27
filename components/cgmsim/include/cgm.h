@@ -58,7 +58,74 @@ typedef struct {
 typedef enum {
     CGM_PATTERN_MANUAL = 0, /* the panel's glucose, moved by the panel's trend */
     CGM_PATTERN_PERSON = 1, /* a virtual person: meals, insulin, dawn, exercise, drift, sensor noise */
+    CGM_PATTERN_BACKTEST = 2, /* a stored trace, replayed reading by reading: the pump changes nothing */
 } cgm_pattern_t;
+
+/* ---- backtest: replaying a stored trace ------------------------------------------
+ *
+ * The trace is a list of readings 5 minutes apart, mg/dL, 0 for a missing one,
+ * kept by the platform (cgm_io_t.trace_at). Each reading slot while playing
+ * sends the next one; a missing one sends nothing, as a real gap would. The
+ * trace waits while the sensor is not OK (warm-up, a forced state). Whatever
+ * the pump does changes nothing, so the same glucose reaches the app on every
+ * run, and the log (cgm_io_t.backtest_log) records what the pump did against
+ * the trace position. */
+
+typedef enum {
+    CGM_BT_CUED = 0,    /* not started: holds the trace's first value */
+    CGM_BT_PLAYING = 1,
+    CGM_BT_PAUSED = 2,  /* holds the last value sent */
+    CGM_BT_ENDED = 3,   /* past the end: stop or hold (cgm_bt_end_t) */
+} cgm_bt_play_t;
+
+typedef enum {
+    CGM_BT_END_STOP = 0, /* no more readings, as a sensor that stopped */
+    CGM_BT_END_HOLD = 1, /* the last value, flat, every reading */
+    CGM_BT_END_LOOP = 2, /* from the start again, as the same run */
+} cgm_bt_end_t;
+
+typedef struct {
+    uint32_t len;     /* readings in the stored trace, 0: none */
+    uint32_t sum;     /* the trace's checksum (cgm_trace_sum), naming it in the log */
+    uint32_t pos;     /* the next reading to play */
+    uint32_t cur;     /* the reading last played (the position the log uses) */
+    uint32_t run;     /* counts plays from the start: 1 the first */
+    uint32_t loops;   /* times round, CGM_BT_END_LOOP */
+    int64_t slot_t;   /* the reading slot last played (a slot plays once) */
+    uint16_t hold;    /* the last value sent, held while not playing */
+    uint8_t play;     /* cgm_bt_play_t */
+    uint8_t end;      /* cgm_bt_end_t */
+} cgm_backtest_t;
+
+/* What the pump is doing, as the backtest log reads it. -1: not known. */
+typedef struct {
+    int64_t delivered; /* hundredths of a unit, ever (what the body would have had) */
+    int32_t rate;      /* the basal running now, hundredths of a unit an hour */
+    bool temp;         /* a temp basal is running */
+    int64_t temp_end;  /* Unix seconds it ends, 0 not known */
+    uint32_t bolus_id; /* changes when a bolus starts */
+    int32_t bolus;     /* that bolus's size, hundredths */
+} cgm_pump_t;
+
+/* One line of the backtest log: 16 bytes, for flash. */
+enum {
+    CGM_LOG_READING = 'R', /* a reading slot played: a glucose (0: the trace's gap), insulin since the last */
+    CGM_LOG_BASAL = 'T',   /* the basal changed: a rate, b minutes of temp basal left (0: none) */
+    CGM_LOG_BOLUS = 'B',   /* a bolus started: a its size */
+    CGM_LOG_START = 'S',   /* playing (from pos), a = 1 from the start */
+    CGM_LOG_PAUSE = 'P',
+    CGM_LOG_END = 'E',     /* the trace ran out */
+    CGM_LOG_LOOP = 'L',    /* round to the start again */
+};
+
+typedef struct {
+    uint8_t kind;   /* CGM_LOG_*; 0xff: erased flash */
+    uint8_t epoch;  /* the log's generation (cgm_logstore_t), set on append */
+    uint16_t run;
+    uint32_t t;     /* Unix seconds */
+    uint32_t pos;   /* the trace position */
+    int16_t a, b;   /* see the kinds; -1 not known */
+} cgm_log_t;
 
 typedef enum {
     CGM_INSULIN_SELF = 0, /* the person doses themselves: basal, and (imperfect) meal boluses */
@@ -129,6 +196,8 @@ typedef struct {
     /* G6 receiver slot (0x01: a receiver, pump or watch): the last reading's
      * seq it was sent. `delivered` above is the phone app's slot (0x02). */
     uint32_t delivered_rx;
+    /* Added later: an older save loads with no trace (len 0). */
+    cgm_backtest_t bt;
 } cgm_state_t;
 
 typedef struct {
@@ -146,6 +215,12 @@ typedef struct {
     /* The simulated pump's cumulative delivery, hundredths of a unit, or -1
      * when there is no pump to read. NULL: none. */
     int64_t (*pump_insulin)(void *ctx);
+    /* Backtest. The stored trace's reading i, mg/dL (0: missing). NULL: none. */
+    uint16_t (*trace_at)(void *ctx, uint32_t i);
+    /* What the pump is doing now; false when there is no pump. NULL: none. */
+    bool (*pump_now)(void *ctx, cgm_pump_t *out);
+    /* Appends a line to the backtest log. NULL: no log. */
+    void (*backtest_log)(void *ctx, const cgm_log_t *e);
 } cgm_io_t;
 
 typedef struct {
@@ -168,6 +243,10 @@ typedef struct {
     bool advertising;
     int64_t window_end;
     int64_t rx_until;         /* G6: advertise for the receiver slot until then */
+    /* Backtest: the pump as last seen (not saved: a restart sees it afresh). */
+    bool bt_seen;
+    cgm_pump_t bt_pump;
+    int64_t bt_delivered;     /* the pump's delivery at the last reading logged */
 } cgm_t;
 
 /* A fresh G6 transmitter (id NULL: a random one) or G7 sensor, started now. */
@@ -199,6 +278,56 @@ void cgm_set_pattern(cgm_t *c, cgm_pattern_t pattern, cgm_insulin_t source, uint
 void cgm_eat(cgm_t *c, uint16_t grams);        /* a snack now, on top of the person's own meals */
 const char *cgm_food_name(uint8_t food);
 void cgm_exercise(cgm_t *c, uint16_t minutes); /* exercise starting now */
+/* Backtest. A trace was stored (len 0: being replaced): cued at its start.
+ * first: its first reading that is not missing. */
+void cgm_backtest_load(cgm_t *c, uint32_t len, uint32_t sum, uint16_t first);
+void cgm_backtest_start(cgm_t *c);   /* play on from where it is (from the start once ended) */
+void cgm_backtest_pause(cgm_t *c);
+void cgm_backtest_restart(cgm_t *c); /* a new run, from the first reading */
+bool cgm_backtest_cue(cgm_t *c, uint32_t pos); /* move to pos, paused; false past the end */
+void cgm_backtest_set_end(cgm_t *c, cgm_bt_end_t end);
+/* When the next trace reading goes out, Unix seconds (0: none due). */
+int64_t cgm_backtest_next(const cgm_t *c);
+
+/* Parses a chunk of an uploaded trace: integers separated by commas, spaces or
+ * new lines; an empty field, "-", "null" or 0 is a missing reading. Readings
+ * outside 40-400 are clamped to it, as a Dexcom shows LOW and HIGH. Returns the
+ * count, or -1 (and *err) for something not a reading (text, a negative, over
+ * 1000) or more than cap. */
+int cgm_trace_parse(const char *text, size_t n, uint16_t *out, size_t cap, const char **err);
+/* The checksum a trace is known by (FNV-1a over the readings, little-endian). */
+uint32_t cgm_trace_sum(uint32_t sum, const uint16_t *v, size_t n);
+#define CGM_TRACE_SUM_INIT 2166136261u
+
+/* A log line as CSV (the header from cgm_log_csv_header). Returns the length. */
+size_t cgm_log_csv_header(char *out, size_t cap);
+size_t cgm_log_csv(const cgm_log_t *e, char *out, size_t cap);
+
+/* The backtest log on flash (or RAM made to act like it): lines appended in
+ * order, each 4096-byte sector erased as the log reaches it, so clearing is
+ * instant. A line of another epoch, or erased, ends the log when it is opened
+ * again. */
+#define CGM_FLASH_SECTOR 4096
+typedef struct {
+    void *ctx;
+    bool (*read)(void *ctx, uint32_t off, void *p, size_t n);
+    bool (*write)(void *ctx, uint32_t off, const void *p, size_t n);
+    bool (*erase)(void *ctx, uint32_t off); /* the sector at off */
+} cgm_flash_t;
+
+typedef struct {
+    const cgm_flash_t *f;
+    uint32_t base, size; /* bytes, sector-aligned */
+    uint32_t count;      /* lines in the log */
+    uint8_t epoch;
+    bool full;
+} cgm_logstore_t;
+
+void cgm_logstore_open(cgm_logstore_t *ls, const cgm_flash_t *f, uint32_t base, uint32_t size, uint8_t epoch);
+void cgm_logstore_clear(cgm_logstore_t *ls, uint8_t epoch); /* a new epoch: the old lines are gone */
+bool cgm_logstore_append(cgm_logstore_t *ls, const cgm_log_t *e);
+bool cgm_logstore_get(const cgm_logstore_t *ls, uint32_t i, cgm_log_t *e);
+
 /* The person's true glucose, mg/dL (tests). */
 int cgm_person_glucose(const cgm_t *c);
 void cgm_new_sensor(cgm_t *c, cgm_kind_t kind, const char *id);

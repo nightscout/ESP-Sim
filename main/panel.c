@@ -231,7 +231,7 @@ static esp_err_t redirect_g7(httpd_req_t *req)
 
 static esp_err_t send_cgm_status(httpd_req_t *req)
 {
-    char json[1400];
+    char json[1800];
     size_t n = cgm_app_status_json(json, sizeof json);
     if (n == 0) {
         return httpd_resp_send_500(req);
@@ -254,6 +254,47 @@ static esp_err_t post_cgm_command(httpd_req_t *req)
         return ESP_OK;
     }
     return send_cgm_status(req);
+}
+
+/* ---- the CGM's backtest: POST /cgm/trace?offset=N (a chunk of readings), GET
+ * /cgm/log.csv (what the pump did, against the trace) -------------------------- */
+
+static esp_err_t post_cgm_trace(httpd_req_t *req)
+{
+    static char body[8192]; /* one request at a time: the server has one task */
+    char q[32], v[12];
+    long offset = -1;
+    if (httpd_req_get_url_query_str(req, q, sizeof q) == ESP_OK &&
+        httpd_query_key_value(q, "offset", v, sizeof v) == ESP_OK) {
+        offset = strtol(v, NULL, 10);
+    }
+    int n = read_body(req, body, sizeof body);
+    if (offset < 0 || n < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "want ?offset=N and up to 8 KB of readings");
+        return ESP_OK;
+    }
+    const char *err = cgm_app_trace_chunk((uint32_t)offset, body, (size_t)n);
+    if (err) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
+        return ESP_OK;
+    }
+    return send_cgm_status(req);
+}
+
+static esp_err_t get_cgm_log(httpd_req_t *req)
+{
+    static char buf[2048];
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"backtest-log.csv\"");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    uint32_t next = 0;
+    size_t n;
+    while ((n = cgm_app_log_csv(&next, buf, sizeof buf)) > 0) {
+        if (httpd_resp_send_chunk(req, buf, (ssize_t)n) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 /* ---- the YpsoPump: GET /ypso, POST /ypso {"command": ...} ----------------------- */
@@ -532,8 +573,8 @@ void panel_start(dash_pod_t *pod)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 12288; /* room for the larger handlers */
-    /* 16 routes here, 3 remote (log, history, firmware), 6 settings, 3 pump and
-     * 4 captive (the last is the wildcard catch-all): 32, with headroom. */
+    /* 18 routes here, 3 remote (log, history, firmware), 6 settings, 3 pump and
+     * 4 captive (the last is the wildcard catch-all): 34, with headroom. */
     cfg.max_uri_handlers = 40;
     cfg.uri_match_fn = httpd_uri_match_wildcard; /* for the portal's catch-all */
     httpd_handle_t server = NULL;
@@ -549,6 +590,8 @@ void panel_start(dash_pod_t *pod)
         {.uri = "/g7/status", .method = HTTP_GET, .handler = send_cgm_status},
         {.uri = "/cgm/command", .method = HTTP_POST, .handler = post_cgm_command},
         {.uri = "/g7/command", .method = HTTP_POST, .handler = post_cgm_command},
+        {.uri = "/cgm/trace", .method = HTTP_POST, .handler = post_cgm_trace},
+        {.uri = "/cgm/log.csv", .method = HTTP_GET, .handler = get_cgm_log},
         {.uri = "/ypso", .method = HTTP_GET, .handler = send_ypso},
         {.uri = "/ypso", .method = HTTP_POST, .handler = panel_post_ypso},
         {.uri = "/patch", .method = HTTP_GET, .handler = send_patch},

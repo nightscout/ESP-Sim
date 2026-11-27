@@ -34,6 +34,7 @@
   button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#0b0d10; font-weight:600; }
   button.danger:hover { border-color:var(--bad); }
+  button:disabled { opacity:.45; cursor:default; border-color:var(--line); }
   table { width:100%; border-collapse:collapse; font-size:14px; }
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
   th { color:var(--mut); font-weight:500; }
@@ -182,6 +183,7 @@
     <div class="seg" id="cgmModeSel">
       <button type="button" data-mode="person">Virtual person</button>
       <button type="button" data-mode="fixed">Fixed</button>
+      <button type="button" data-mode="backtest" id="modeBtBtn" hidden>Backtest</button>
     </div>
 
     <div class="subbox" id="modePerson" hidden>
@@ -210,6 +212,48 @@
         <div style="flex:0"><button class="primary" id="cgmFixedSet">Apply</button></div>
       </div>
       <div class="muted" style="margin-top:8px">One value with a trend; every reading repeats it. The glucose the app sees is this value.</div>
+    </div>
+
+    <div class="subbox" id="modeBacktest" hidden>
+      <h3>Backtest</h3>
+      <div class="big"><span class="val sm" id="btWhere">No trace</span><span class="chip" id="btPlay" role="status">—</span></div>
+      <progress id="btBar" max="1" value="0" style="width:100%;margin-top:10px" aria-label="Trace position"></progress>
+      <dl>
+        <dt>Trace</dt><dd id="btTrace">—</dd>
+        <dt>Run</dt><dd id="btRun">—</dd>
+        <dt>Next reading</dt><dd id="btNext">—</dd>
+        <dt>Pump log</dt><dd id="btLog">—</dd>
+      </dl>
+      <div class="actions">
+        <button class="primary" id="btStart">Start</button>
+        <button id="btPause">Pause</button>
+        <button class="danger" id="btRestart">Restart from the beginning</button>
+      </div>
+      <div class="row">
+        <div><label for="btEnd">At the end of the trace</label>
+          <select id="btEnd"><option value="0">Stop (no more readings)</option><option value="1">Hold the last value</option><option value="2">Loop to the start</option></select></div>
+        <div><label for="btCue">Go to reading (paused)</label><input type="number" id="btCue" min="1" step="1"></div>
+        <div style="flex:0"><button id="btCueSet">Go</button></div>
+      </div>
+
+      <div class="subbox">
+        <h3>Load a trace</h3>
+        <div class="row">
+          <div><label for="btFile">CSV or JSON of readings (a Nightscout or Dexcom export, or one mg/dL value per line)</label><input type="file" id="btFile" accept=".csv,.json,.txt,text/csv,application/json,text/plain"></div>
+        </div>
+        <div class="actions">
+          <button class="primary" id="btUpload">Upload to the board</button>
+          <button id="btSample">Use a synthetic day</button>
+        </div>
+        <div class="muted" id="btFileInfo" style="margin-top:8px"></div>
+        <div class="muted" style="margin-top:8px">The file is read here, in your browser: only the glucose values, one every 5 minutes, go to the board. Names, notes and times stay behind. Readings are lined up on a 5-minute grid; a missing one stays missing (the app sees a gap). mmol/L is converted; LOW and HIGH become 40 and 400. Loading a trace replaces the one on the board and clears its log.</div>
+      </div>
+
+      <div class="actions">
+        <button type="button" id="btDownload">Download the pump log (CSV)</button>
+        <button class="danger" id="btClear">Clear the log</button>
+      </div>
+      <div class="muted" style="margin-top:8px">Replays the trace one reading every 5 minutes. Whatever the pump delivers, the app sees the same glucose, so two builds of an algorithm can be run against it and their logs compared: each line has the run, the trace position, and what the pump did (temp basals, boluses, insulin since the last reading). The trace waits while the sensor warms up or is not OK. Times of day are today's: for a like-for-like run, start at the same time of day or use flat schedules. A pod reports its boluses and when a temp basal runs, not its rate. Test equipment: use only a test phone that controls no real pump or pod.</div>
     </div>
 
 
@@ -299,7 +343,8 @@ async function refreshBoard(){
       oChip('ovCgmState', CGM_STATES[c.state] || ('state '+c.state), c.state===6 ? 'ok' : c.state===2 ? 'warn' : 'bad');
       oV('ovCgmValue', (c.last && c.last.glucose ? c.last.glucose : c.glucose)+' mg/dL');
       oV('ovCgmNote', (c.connected ? 'phone connected' : c.advertising ? 'advertising' : 'waiting')
-        +' · '+(c.kind===7 ? 'code '+c.id : 'transmitter '+c.id));
+        +' · '+(c.kind===7 ? 'code '+c.id : 'transmitter '+c.id)
+        +(c.pattern===2 && c.backtest && c.backtest.len ? ' · backtest '+BT_PLAY[c.backtest.play]+', reading '+btReading(c.backtest)+' of '+c.backtest.len : ''));
     }
   } catch(e) {}
 }
@@ -372,7 +417,9 @@ $('cgmLoss').onchange = ()=>cgmSend({command:'cgmSignalLoss', on:$('cgmLoss').ch
 /* This firmware's CGM makes glucose two ways (cgmPattern 0, fixed: the panel's value
  * and trend; 1, the virtual person); the PR's wave and walk are not simulated. */
 document.querySelectorAll('#cgmModeSel button').forEach(b=>b.onclick=()=>{
-  if(b.dataset.mode==='person') sendPerson(); else sendFixed('Now a fixed glucose');
+  if(b.dataset.mode==='person') sendPerson();
+  else if(b.dataset.mode==='backtest') cgmSend({command:'cgmPattern', pattern:2, source:cgmStatus ? cgmStatus.insulinSource|0 : 0}, 'Now the backtest trace');
+  else sendFixed('Now a fixed glucose');
 });
 async function sendFixed(done){
   cgmEdited.cgmGlucoseIn=cgmEdited.cgmTrendIn=false;
@@ -397,9 +444,9 @@ $('cgmSnack').onclick = ()=>cgmSend({command:'cgmEat', grams:20}, 'The person ha
 $('cgmExercise').onclick = ()=>cgmSend({command:'cgmExercise', minutes:45}, 'The person goes for a run');
 
 function modeView(kind){
-  ['idle'].forEach(()=>{});
   $('modePerson').hidden = kind!=='person';
   $('modeFixed').hidden = kind!=='fixed';
+  $('modeBacktest').hidden = kind!=='backtest';
   document.querySelectorAll('#cgmModeSel button').forEach(b=>b.classList.toggle('active', b.dataset.mode===kind));
 }
 
@@ -434,7 +481,9 @@ function showCgm(c){
 function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
 
 function showPerson(c){
-  const kind = c.pattern===1 || c.pattern==='person' ? 'person' : 'fixed'; /* 0 fixed, 1 the person */
+  const kind = c.pattern===1 || c.pattern==='person' ? 'person' : c.pattern===2 ? 'backtest' : 'fixed'; /* 0 fixed, 1 the person, 2 backtest */
+  $('modeBtBtn').hidden = !c.btStore; /* built without backtest: no such mode */
+  if(kind==='backtest') showBacktest(c);
   if(!cgmEdited.cgmSourceIn) $('cgmSourceIn').value = String(c.insulinSource);
   if(!cgmEdited.cgmIsfIn && document.activeElement!==$('cgmIsfIn')) $('cgmIsfIn').value = c.isf;
   if(!cgmEdited.cgmIcrIn && document.activeElement!==$('cgmIcrIn')) $('cgmIcrIn').value = c.icr;
@@ -448,6 +497,136 @@ function showPerson(c){
   if(c.nextMeal) parts.push('next: '+c.nextFood+' ('+c.nextMealGrams+' g) around '+hm(c.nextMeal));
   $('cgmPersonInfo').textContent = parts.join(' · ');
 }
+
+/* ---- backtest: a stored trace, replayed ---- */
+const BT_PLAY = ['not started','playing','paused','ended'];
+const btReading = b => b.play===0 ? 0 : b.cur+1; /* 1-based, for people */
+function btSend(body, done){ cgmSend(Object.assign({command:'cgmBacktest'}, body), done); }
+const mins = n => { const m = n*5; return (m>=1440 ? Math.floor(m/1440)+' d ' : '')+Math.floor(m%1440/60)+' h '+(m%60)+' min'; };
+
+function showBacktest(c){
+  const b = c.backtest || {}, s = c.btStore || {};
+  if(!b.len){
+    $('btWhere').textContent = s.uploading ? 'Uploading…' : 'No trace';
+    chip($('btPlay'), 'no trace', 'warn');
+    $('btBar').value = 0; $('btTrace').textContent = 'Load one below: until then the readings are '+c.glucose+' mg/dL, flat.';
+    $('btRun').textContent = '—'; $('btNext').textContent = '—';
+  } else {
+    const at = btReading(b);
+    $('btWhere').textContent = 'Reading '+at+' of '+b.len;
+    chip($('btPlay'), BT_PLAY[b.play], b.play===1 ? 'ok' : b.play===3 && b.end===0 ? 'bad' : 'warn');
+    $('btBar').max = b.len; $('btBar').value = b.play===3 ? b.len : b.pos;
+    $('btTrace').textContent = b.len+' readings ('+mins(b.len)+'), id '+b.sum+', in '+(s.where==='flash' ? 'flash' : 'RAM (lost on a restart)');
+    $('btRun').textContent = b.run ? 'run '+b.run+(b.loops ? ', round '+(b.loops+1) : '')+', '+mins(at)+' in' : 'not started yet';
+    $('btNext').textContent = b.play===1 ? 'reading '+(b.pos+1)+' at '+hm(b.next)
+      : b.play===3 && b.end===0 ? 'none: the trace has ended' : 'holding '+b.hold+' mg/dL';
+  }
+  $('btLog').textContent = s.logLines+' lines of '+s.logCap+(s.logFull ? ' (full: clear it to log more)' : '');
+  $('btStart').textContent = b.play===2 ? 'Resume' : b.play===3 ? 'Start again' : 'Start';
+  $('btStart').disabled = !b.len || b.play===1; $('btPause').disabled = b.play!==1; $('btRestart').disabled = !b.len;
+  if(!cgmEdited.btEnd) $('btEnd').value = String(b.end|0);
+  if(!cgmEdited.btCue && document.activeElement!==$('btCue')) $('btCue').max = b.len || 1;
+}
+$('btStart').onclick = ()=>btSend({action:'start'}, 'Playing: the next reading is the trace’s');
+$('btPause').onclick = ()=>btSend({action:'pause'}, 'Paused: holding the last value');
+$('btRestart').onclick = ()=>{ if(!sure('Restart the trace from its first reading, as a new run?')) return; btSend({action:'restart'}, 'Restarted: run from the beginning'); };
+$('btEnd').onchange = ()=>{ cgmEdited.btEnd=false; btSend({action:'end', end:+$('btEnd').value}, 'Set'); };
+$('btCueSet').onclick = ()=>{ const n = Math.round(+$('btCue').value); if(!(n>=1)) { say('Which reading? From 1'); return; }
+  btSend({action:'cue', pos:n-1}, 'At reading '+n+', paused'); };
+$('btDownload').onclick = ()=>{ location.href = '/cgm/log.csv'; };
+$('btClear').onclick = ()=>{ if(!sure('Clear the pump log? Download it first to keep it.')) return; btSend({action:'clearLog'}, 'Log cleared'); };
+['btEnd','btCue'].forEach(id=>$(id).oninput=()=>cgmEdited[id]=true);
+
+/* A file into readings: a 5-minute grid of mg/dL, 0 for a missing one. */
+function btParse(text){
+  const rows = []; /* {t: ms or null, g} */
+  const glu = v => { if(v==null) return null; const s = String(v).trim().replace(/^"|"$/g,'');
+    if(/^low$/i.test(s)) return 40; if(/^high$/i.test(s)) return 400;
+    const n = parseFloat(s.replace(',', '.')); return isFinite(n) && n > 0 ? n : null; };
+  const when = v => { if(v==null || v==='') return null; const n = +v; if(isFinite(n) && n > 1e9) return n < 1e12 ? n*1000 : n;
+    const d = Date.parse(String(v).trim().replace(/^"|"$/g,'')); return isFinite(d) ? d : null; };
+  const t = text.trim();
+  if(t[0]==='[' || t[0]==='{'){
+    let j = JSON.parse(t); if(!Array.isArray(j)) j = j.entries || j.readings || j.data || [];
+    for(const e of j){
+      if(typeof e === 'number' || typeof e === 'string'){ rows.push({t:null, g:glu(e)}); continue; }
+      if(e && e.type && e.type !== 'sgv') continue; /* Nightscout: only sensor readings */
+      const g = glu(e.sgv ?? e.glucose ?? e.value ?? e.mgdl ?? e.bg);
+      if(g!=null) rows.push({t: when(e.date ?? e.dateString ?? e.time ?? e.timestamp ?? e.sysTime), g});
+    }
+  } else {
+    const lines = t.split(/\r?\n/), sep = /\t/.test(lines[0]) ? '\t' : /;/.test(lines[0]) && !/,/.test(lines[0]) ? ';' : ',';
+    const split = l => l.split(sep).map(x=>x.trim().replace(/^"|"$/g,''));
+    const head = split(lines[0]).map(h=>h.toLowerCase());
+    const hasHead = head.some(h=>/[a-z]/.test(h) && !/^(low|high|null)$/.test(h));
+    let gi = 0, ti = -1;
+    if(hasHead){
+      gi = head.findIndex(h=>/^sgv$|glucose value|^glucose|^bg$|mg\/dl|mmol|^value$/.test(h));
+      ti = head.findIndex(h=>/^date$|datestring|timestamp|^time|^datetime|^date ?time/.test(h));
+      if(gi < 0) throw new Error('no glucose column (sgv, glucose or value)');
+    }
+    for(const l of lines.slice(hasHead ? 1 : 0)){
+      if(!l.trim()) continue;
+      const f = split(l), g = glu(f[gi]);
+      if(hasHead && g==null) continue; /* not a reading: a calibration, an alert, a note */
+      rows.push({t: ti >= 0 ? when(f[ti]) : null, g});
+    }
+  }
+  if(!rows.length) throw new Error('no readings found');
+  /* mmol/L: every value small, some with decimals. */
+  const vals = rows.filter(r=>r.g!=null).map(r=>r.g);
+  const mmol = vals.length && Math.max(...vals) < 35 && vals.some(v=>v%1);
+  const mg = g => g==null ? 0 : Math.min(400, Math.max(40, Math.round(mmol ? g*18.016 : g)));
+  if(rows.every(r=>r.t==null)) return {values: rows.map(r=>mg(r.g)), mmol, timed:false};
+  const timed = rows.filter(r=>r.t!=null).sort((a,b)=>a.t-b.t), t0 = timed[0].t;
+  const n = Math.round((timed[timed.length-1].t - t0)/300000)+1;
+  if(n > 40000) throw new Error('over 40000 readings (more than 4 months)');
+  const out = new Array(n).fill(0);
+  for(const r of timed){ const i = Math.round((r.t-t0)/300000); if(!out[i]) out[i] = mg(r.g); }
+  return {values: out, mmol, timed:true};
+}
+
+/* A made-up day: steady overnight, a dawn rise, three meals, a gap. No one's data. */
+function btSynthetic(){
+  let seed = 7; const rnd = ()=>((seed = seed*1103515245+12345 & 0x7fffffff)/0x7fffffff);
+  const out = [];
+  for(let i=0; i<288; i++){
+    const h = i/12; let g = 110 + 15*Math.exp(-(((h-6)/1.5)**2));
+    for(const [at, up] of [[7.5,75],[12.5,60],[18.5,85]]) if(h>at) g += up*(h-at)/0.75*Math.exp(1-(h-at)/0.75);
+    out.push(Math.round(g + (rnd()-0.5)*6));
+  }
+  out[150] = out[151] = 0;
+  return out;
+}
+
+let btPending = null;
+$('btFile').onchange = async ()=>{
+  btPending = null; const f = $('btFile').files[0]; if(!f) return;
+  try { const r = btParse(await f.text()); btPending = r.values;
+    const gaps = r.values.filter(v=>!v).length;
+    $('btFileInfo').textContent = r.values.length+' readings ('+mins(r.values.length)+')'+(gaps ? ', '+gaps+' missing' : '')
+      +(r.mmol ? ', converted from mmol/L' : '')+(r.timed ? '' : ', no times: taken as 5 minutes apart')+'. Upload it to use it.';
+  } catch(e){ $('btFileInfo').textContent = 'Could not read it: '+e.message; }
+};
+async function btUpload(values, what){
+  if(cgmStatus && cgmStatus.btStore && values.length > cgmStatus.btStore.traceCap){
+    say('Too long: this board holds '+cgmStatus.btStore.traceCap+' readings'); return; }
+  try {
+    for(let off=0; off<values.length || off===0; off+=1000){
+      $('btFileInfo').textContent = 'Uploading… '+Math.round(100*off/values.length)+'%';
+      const r = await fetch('/cgm/trace?offset='+off, {method:'POST', headers:{'Content-Type':'text/plain'}, body:values.slice(off, off+1000).join(',')});
+      if(!r.ok) throw new Error((await r.text()).trim());
+    }
+    $('btFileInfo').textContent = '';
+    btSend({action:'loaded', length:values.length}, 'Loaded '+what+': '+values.length+' readings');
+  } catch(e){ $('btFileInfo').textContent = ''; say('Upload failed — '+e.message); }
+}
+$('btUpload').onclick = ()=>{ if(!btPending){ say('Choose a file first'); return; }
+  if(cgmStatus && cgmStatus.backtest && cgmStatus.backtest.len && !sure('Replace the trace on the board, and clear its log?')) return;
+  btUpload(btPending, 'the trace'); };
+$('btSample').onclick = ()=>{
+  if(cgmStatus && cgmStatus.backtest && cgmStatus.backtest.len && !sure('Replace the trace on the board with a synthetic day, and clear its log?')) return;
+  btUpload(btSynthetic(), 'a synthetic day'); };
 
 /* The next reading's countdown: mm:ss from the status's own clock (now /
  * nextReading), ticked once a second and clamped at 0:00. */

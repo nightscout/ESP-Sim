@@ -47,6 +47,13 @@ void cgm_app_on_write(cgm_chr_t chr, const uint8_t *p, size_t n);
 size_t cgm_app_on_read(cgm_chr_t chr, uint8_t *out, size_t cap);
 size_t cgm_app_status_json(char *out, size_t cap);
 const char *cgm_app_command(const char *body); /* NULL, or what was wrong */
+/* Backtest (CONFIG_ESPSIM_CGM_BACKTEST): a chunk of an uploaded trace, its
+ * readings from offset (0 starts a new trace), as cgm_trace_parse reads them.
+ * NULL, or what was wrong. */
+const char *cgm_app_trace_chunk(uint32_t offset, const char *text, size_t n);
+/* The backtest log as CSV, from line *next on (0: the header first): fills out
+ * and moves *next; 0 once it is all out. */
+size_t cgm_app_log_csv(uint32_t *next, char *out, size_t cap);
 
 /* main.c: the pod's state, read-only (the CGM's virtual person reads its deliveries). */
 const dash_state_t *pod_state(void);
@@ -71,6 +78,7 @@ void medtrum_app_start(void);
 bool medtrum_app_state_valid(const medtrum_saved_t *st);
 /* The control panel: GET /patch's JSON, and POST /patch's command. */
 size_t medtrum_app_status_json(char *out, size_t cap);
+bool medtrum_app_delivery(medtrum_delivery_t *out); /* a copy of the delivery model; false if not started */
 const char *medtrum_app_command(const char *body);
 
 /* ypso_app.c: the simulated YpsoPump. */
@@ -105,6 +113,8 @@ void store_save_ypso_peers(const uint8_t *p, size_t n);
 void store_save_ypso_open(bool open);
 void store_save_ypso(void *ctx, const ypso_state_t *st);
 void store_save_cgm(void *ctx, const cgm_state_t *st);
+uint8_t store_load_bt_epoch(void); /* the backtest log's generation */
+void store_save_bt_epoch(uint8_t epoch);
 
 /* panel.c: Wi-Fi (station or access point) and the HTTP control panel. */
 void panel_start(dash_pod_t *pod);

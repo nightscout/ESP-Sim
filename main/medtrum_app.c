@@ -338,6 +338,15 @@ static bool json_str(const char *j, const char *key, char *out, size_t cap)
     return *p == '"';
 }
 
+bool medtrum_app_delivery(medtrum_delivery_t *out)
+{
+    if (mu == NULL) {
+        return false;
+    }
+    LOCKED(*out = patch.delivery);
+    return true;
+}
+
 size_t medtrum_app_status_json(char *out, size_t cap)
 {
     if (mu == NULL) {

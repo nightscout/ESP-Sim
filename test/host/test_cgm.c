@@ -586,6 +586,7 @@ static void test_status(void)
 }
 
 static void test_person(void);
+static void test_backtest(void);
 
 void test_cgm_all(void)
 {
@@ -596,6 +597,7 @@ void test_cgm_all(void)
     test_g6_slots();
     test_status();
     test_person();
+    test_backtest();
 }
 
 /* ---- the virtual person ------------------------------------------------------------------ */
@@ -714,4 +716,348 @@ static void test_person(void)
 
     /* The food names. */
     CHECK(strcmp(cgm_food_name(0), "porridge with banana") == 0);
+}
+
+/* ---- backtest: a stored trace, replayed ---------------------------------------------------- */
+
+/* A synthetic trace: made up here, no one's real readings. */
+static uint16_t bt_trace[64];
+static uint32_t bt_len;
+static uint16_t f_trace_at(void *ctx, uint32_t i) { return i < bt_len ? bt_trace[i] : 0xffff; }
+
+static cgm_pump_t bt_pump;
+static bool f_pump_now(void *ctx, cgm_pump_t *out)
+{
+    *out = bt_pump;
+    return true;
+}
+
+static cgm_log_t bt_log[256];
+static int bt_nlog;
+static void f_bt_log(void *ctx, const cgm_log_t *e)
+{
+    if (bt_nlog < 256) {
+        bt_log[bt_nlog++] = *e;
+    }
+}
+
+static int bt_count(uint8_t kind)
+{
+    int n = 0;
+    for (int i = 0; i < bt_nlog; i++) {
+        n += bt_log[i].kind == kind;
+    }
+    return n;
+}
+
+/* A G7, warmed up, on the backtest pattern with the trace loaded. */
+static void bt_setup(cgm_t *c, cgm_io_t *io)
+{
+    *io = fio;
+    io->trace_at = f_trace_at;
+    io->pump_now = f_pump_now;
+    io->backtest_log = f_bt_log;
+    memset(&fk, 0, sizeof fk);
+    fk.now = 1800000000;
+    bt_nlog = 0;
+    memset(&bt_pump, 0, sizeof bt_pump);
+    bt_pump.rate = 80;
+    cgm_state_t st;
+    cgm_state_fresh(&st, CGM_G7, NULL, fk.now);
+    cgm_init(c, &st, io);
+    cgm_skip_warmup(c);
+    cgm_set_pattern(c, CGM_PATTERN_BACKTEST, CGM_INSULIN_PUMP, 0, 0, 0);
+    uint16_t first = 0;
+    for (uint32_t i = 0; i < bt_len && !first; i++) {
+        first = bt_trace[i];
+    }
+    cgm_backtest_load(c, bt_len, cgm_trace_sum(CGM_TRACE_SUM_INIT, bt_trace, bt_len), first);
+}
+
+/* Runs to the next reading slot and returns the reading made there (0: none). */
+static int bt_next(cgm_t *c, int8_t *trend)
+{
+    uint32_t before = c->st.n_hist ? c->st.hist[c->st.n_hist - 1].seq : 0;
+    run(c, CGM_READING_INTERVAL);
+    const cgm_reading_t *r = c->st.n_hist ? &c->st.hist[c->st.n_hist - 1] : NULL;
+    if (!r || r->seq == before) {
+        return 0;
+    }
+    if (trend) {
+        *trend = r->trend;
+    }
+    return r->glucose;
+}
+
+/* A fake NOR flash: writes only clear bits, erase sets a sector to 0xff. */
+static uint8_t nor[4 * CGM_FLASH_SECTOR];
+static int nor_erases;
+static bool nor_read(void *ctx, uint32_t off, void *p, size_t n)
+{
+    if (off + n > sizeof nor) {
+        return false;
+    }
+    memcpy(p, nor + off, n);
+    return true;
+}
+static bool nor_write(void *ctx, uint32_t off, const void *p, size_t n)
+{
+    if (off + n > sizeof nor) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        nor[off + i] &= ((const uint8_t *)p)[i];
+    }
+    return true;
+}
+static bool nor_erase(void *ctx, uint32_t off)
+{
+    if (off % CGM_FLASH_SECTOR || off >= sizeof nor) {
+        return false;
+    }
+    memset(nor + off, 0xff, CGM_FLASH_SECTOR);
+    nor_erases++;
+    return true;
+}
+static const cgm_flash_t nor_flash = {.read = nor_read, .write = nor_write, .erase = nor_erase};
+
+static void test_backtest_parse(void)
+{
+    uint16_t v[16];
+    const char *err = NULL;
+    const char *t = "120,121, 0,,-,null\n500\r\n30 \n";
+    CHECK(cgm_trace_parse(t, strlen(t), v, 16, &err) == 8);
+    static const uint16_t want[8] = {120, 121, 0, 0, 0, 0, 400, 40};
+    CHECK(memcmp(v, want, sizeof want) == 0);
+    t = "100 101\t102";
+    CHECK(cgm_trace_parse(t, strlen(t), v, 16, &err) == 3 && v[2] == 102);
+    t = "100,abc";
+    err = NULL;
+    CHECK(cgm_trace_parse(t, strlen(t), v, 16, &err) == -1 && err);
+    t = "100,-5";
+    CHECK(cgm_trace_parse(t, strlen(t), v, 16, &err) == -1);
+    t = "100,1001";
+    CHECK(cgm_trace_parse(t, strlen(t), v, 16, &err) == -1);
+    t = "1,2,3";
+    CHECK(cgm_trace_parse(t, strlen(t), v, 2, &err) == -1);
+    CHECK(cgm_trace_parse("", 0, v, 16, &err) == 0);
+    /* The checksum: order matters, and it chains across chunks. */
+    static const uint16_t a[3] = {100, 110, 120}, b[3] = {110, 100, 120};
+    uint32_t whole = cgm_trace_sum(CGM_TRACE_SUM_INIT, a, 3);
+    CHECK(whole != cgm_trace_sum(CGM_TRACE_SUM_INIT, b, 3));
+    CHECK(whole == cgm_trace_sum(cgm_trace_sum(CGM_TRACE_SUM_INIT, a, 1), a + 1, 2));
+}
+
+static void test_backtest_play(void)
+{
+    static cgm_t c;
+    static cgm_io_t io;
+    /* 100, 110, 120, 130, a gap, 150, 160, 170 */
+    static const uint16_t tr[8] = {100, 110, 120, 130, 0, 150, 160, 170};
+    memcpy(bt_trace, tr, sizeof tr);
+    bt_len = 8;
+    bt_setup(&c, &io);
+    CHECK(c.st.bt.play == CGM_BT_CUED && c.st.bt.hold == 100);
+    /* Cued: the first value, flat, and nothing logged. */
+    CHECK(bt_next(&c, NULL) == 100);
+    CHECK(bt_nlog == 0);
+    cgm_backtest_start(&c);
+    CHECK(c.st.bt.run == 1 && bt_count(CGM_LOG_START) == 1);
+    int8_t trend = 0;
+    int got[8];
+    for (int i = 0; i < 4; i++) {
+        got[i] = bt_next(&c, &trend);
+    }
+    CHECK(got[0] == 100 && got[1] == 110 && got[2] == 120 && got[3] == 130);
+    CHECK(trend == (130 - 100) * 10 / 15); /* 15 minutes back, in the trace itself */
+    /* The gap: no reading at all, then on. */
+    CHECK(bt_next(&c, NULL) == 0);
+    CHECK(c.st.bt.cur == 4);
+    CHECK(bt_next(&c, NULL) == 150);
+    char json[1400];
+    CHECK(cgm_status_json(&c, json, sizeof json) > 0 && strstr(json, "\"backtest\":{\"len\":8,") &&
+          strstr(json, "\"pos\":6,"));
+    /* Pause: the last value held, the trace stays put. */
+    cgm_backtest_pause(&c);
+    CHECK(bt_next(&c, NULL) == 150 && bt_next(&c, NULL) == 150);
+    CHECK(c.st.bt.pos == 6);
+    cgm_backtest_start(&c);
+    CHECK(bt_next(&c, NULL) == 160 && bt_next(&c, NULL) == 170);
+    /* The end, stopping: no more readings. */
+    CHECK(c.st.bt.play == CGM_BT_ENDED && bt_count(CGM_LOG_END) == 1);
+    CHECK(bt_next(&c, NULL) == 0 && bt_next(&c, NULL) == 0);
+    CHECK(bt_count(CGM_LOG_READING) == 8);
+    /* Holding instead. */
+    cgm_backtest_set_end(&c, CGM_BT_END_HOLD);
+    CHECK(bt_next(&c, NULL) == 170);
+    /* Start once ended: a new run from the beginning. */
+    cgm_backtest_start(&c);
+    CHECK(c.st.bt.run == 2 && c.st.bt.pos == 0);
+    CHECK(bt_next(&c, NULL) == 100);
+    /* Looping: round again as the same run, the trend across the join. */
+    cgm_backtest_set_end(&c, CGM_BT_END_LOOP);
+    for (int i = 0; i < 7; i++) {
+        bt_next(&c, NULL);
+    }
+    CHECK(c.st.bt.loops == 1 && c.st.bt.play == CGM_BT_PLAYING && bt_count(CGM_LOG_LOOP) == 1);
+    CHECK(bt_next(&c, &trend) == 100 && trend == (100 - 150) * 10 / 15);
+    /* Cue: move to a position, paused, holding the reading before it. */
+    CHECK(cgm_backtest_cue(&c, 3) && c.st.bt.play == CGM_BT_PAUSED && c.st.bt.hold == 120);
+    CHECK(!cgm_backtest_cue(&c, 8));
+    cgm_backtest_start(&c);
+    CHECK(c.st.bt.run == 2 && bt_next(&c, NULL) == 130);
+    /* Restart: a new run. */
+    cgm_backtest_restart(&c);
+    CHECK(c.st.bt.run == 3 && bt_next(&c, NULL) == 100);
+    /* A new sensor keeps the trace and its place. */
+    uint32_t pos = c.st.bt.pos;
+    cgm_new_sensor(&c, CGM_G6, "81AB7Q");
+    CHECK(c.st.bt.len == 8 && c.st.bt.pos == pos && c.st.pattern == CGM_PATTERN_BACKTEST);
+    /* The trace waits out the warm-up: readings then have no glucose. */
+    CHECK(bt_next(&c, NULL) == 0);
+    CHECK(c.st.bt.pos == pos);
+    cgm_skip_warmup(&c); /* a reading is due at once: the trace's next */
+    run(&c, 1);
+    CHECK(c.st.hist[c.st.n_hist - 1].glucose == bt_trace[pos] && c.st.bt.cur == pos);
+    /* No trace (being replaced): the panel's value, flat. */
+    cgm_backtest_load(&c, 0, 0, 0);
+    cgm_set_glucose(&c, 140, 0);
+    CHECK(bt_next(&c, NULL) == 140);
+}
+
+/* The point of it: the pump changes nothing, so two runs see the same glucose. */
+static void test_backtest_same_runs(void)
+{
+    static cgm_t c;
+    static cgm_io_t io;
+    for (uint32_t i = 0; i < 40; i++) {
+        bt_trace[i] = (uint16_t)(120 + 60 * sin(i / 6.0) + (i % 7 == 3 ? 0 : 0));
+    }
+    bt_trace[17] = 0;
+    bt_len = 40;
+    int seen[2][40];
+    for (int r = 0; r < 2; r++) {
+        bt_setup(&c, &io);
+        cgm_backtest_start(&c);
+        for (int i = 0; i < 40; i++) {
+            /* A different pump each run: run 2 gives far more insulin. */
+            bt_pump.delivered += r ? 50 : 2;
+            seen[r][i] = bt_next(&c, NULL);
+        }
+    }
+    CHECK(memcmp(seen[0], seen[1], sizeof seen[0]) == 0);
+    CHECK(seen[0][17] == 0 && seen[0][0] == bt_trace[0] && seen[0][39] == bt_trace[39]);
+}
+
+static void test_backtest_log(void)
+{
+    static cgm_t c;
+    static cgm_io_t io;
+    static const uint16_t tr[6] = {180, 190, 200, 210, 200, 190};
+    memcpy(bt_trace, tr, sizeof tr);
+    bt_len = 6;
+    bt_setup(&c, &io);
+    bt_pump.delivered = 1000;
+    cgm_backtest_start(&c);
+    run(&c, 2);
+    /* Opening the run: the basal as it is. */
+    CHECK(bt_nlog == 2 && bt_log[1].kind == CGM_LOG_BASAL && bt_log[1].a == 80 && bt_log[1].b == 0);
+    bt_next(&c, NULL); /* reading 0 */
+    /* The AID sets a temp basal of 2.50 U/h for 30 minutes, then a bolus of 1.20 U. */
+    bt_pump.rate = 250;
+    bt_pump.temp = true;
+    bt_pump.temp_end = fk.now + 1800;
+    run(&c, 5);
+    bt_pump.bolus_id = 7;
+    bt_pump.bolus = 120;
+    bt_pump.delivered += 120 + 10;
+    bt_next(&c, NULL); /* reading 1 */
+    const cgm_log_t *t = NULL, *b = NULL, *r1 = NULL;
+    for (int i = 0; i < bt_nlog; i++) {
+        if (bt_log[i].kind == CGM_LOG_BASAL && bt_log[i].a == 250) {
+            t = &bt_log[i];
+        }
+        if (bt_log[i].kind == CGM_LOG_BOLUS) {
+            b = &bt_log[i];
+        }
+        if (bt_log[i].kind == CGM_LOG_READING && bt_log[i].pos == 1) {
+            r1 = &bt_log[i];
+        }
+    }
+    CHECK(t && t->pos == 0 && t->b == 30 && t->run == 1);
+    CHECK(b && b->a == 120 && b->pos == 0);
+    CHECK(r1 && r1->a == 190 && r1->b == 130); /* the insulin since reading 0 */
+    /* Nothing is logged while paused. */
+    cgm_backtest_pause(&c);
+    int n = bt_nlog;
+    bt_pump.rate = 0;
+    bt_next(&c, NULL);
+    CHECK(bt_nlog == n);
+
+    /* As CSV. */
+    char line[160];
+    CHECK(cgm_log_csv_header(line, sizeof line) > 0 && strncmp(line, "run,position,trace_minute,", 26) == 0);
+    cgm_log_t e = {.kind = CGM_LOG_READING, .run = 2, .t = 1800000000, .pos = 12, .a = 154, .b = 35};
+    CHECK(cgm_log_csv(&e, line, sizeof line) > 0);
+    CHECK(strcmp(line, "2,12,60,2027-01-15T08:00:00Z,reading,154,0.35,,,\n") == 0);
+    e = (cgm_log_t){.kind = CGM_LOG_BASAL, .run = 2, .t = 1800000000, .pos = 12, .a = 250, .b = 30};
+    cgm_log_csv(&e, line, sizeof line);
+    CHECK(strcmp(line, "2,12,,2027-01-15T08:00:00Z,temp_basal,,,2.50,30,\n") == 0);
+    e = (cgm_log_t){.kind = CGM_LOG_BASAL, .run = 2, .t = 1800000000, .pos = 12, .a = -1, .b = 0};
+    cgm_log_csv(&e, line, sizeof line);
+    CHECK(strcmp(line, "2,12,,2027-01-15T08:00:00Z,basal,,,,0,\n") == 0);
+    e = (cgm_log_t){.kind = CGM_LOG_BOLUS, .run = 2, .t = 1800000000, .pos = 13, .a = 120, .b = -1};
+    cgm_log_csv(&e, line, sizeof line);
+    CHECK(strcmp(line, "2,13,,2027-01-15T08:00:00Z,bolus,,,,,1.20\n") == 0);
+    e = (cgm_log_t){.kind = CGM_LOG_READING, .run = 2, .t = 1800000000, .pos = 14, .a = 0, .b = -1};
+    cgm_log_csv(&e, line, sizeof line);
+    CHECK(strcmp(line, "2,14,70,2027-01-15T08:00:00Z,missing,,,,,\n") == 0);
+}
+
+static void test_backtest_logstore(void)
+{
+    memset(nor, 0, sizeof nor); /* never erased: garbage */
+    cgm_logstore_t ls;
+    cgm_logstore_open(&ls, &nor_flash, CGM_FLASH_SECTOR, 2 * CGM_FLASH_SECTOR, 1);
+    cgm_logstore_clear(&ls, 1);
+    CHECK(ls.count == 0 && !ls.full);
+    int per = CGM_FLASH_SECTOR / (int)sizeof(cgm_log_t);
+    nor_erases = 0;
+    cgm_log_t e = {.kind = CGM_LOG_READING};
+    for (int i = 0; i < per + 3; i++) {
+        e.pos = (uint32_t)i;
+        if (!cgm_logstore_append(&ls, &e)) { CHECK(false); }
+    }
+    CHECK(ls.count == (uint32_t)per + 3 && nor_erases == 1); /* the second sector, as reached */
+    /* Opened again (a restart): the same lines. */
+    cgm_logstore_t again;
+    cgm_logstore_open(&again, &nor_flash, CGM_FLASH_SECTOR, 2 * CGM_FLASH_SECTOR, 1);
+    CHECK(again.count == ls.count);
+    cgm_log_t got;
+    CHECK(cgm_logstore_get(&again, (uint32_t)per + 2, &got) && got.pos == (uint32_t)per + 2 && got.epoch == 1);
+    CHECK(!cgm_logstore_get(&again, again.count, &got));
+    /* Cleared, then a full first sector: the old lines in the second sector,
+     * not yet erased, are another epoch's and do not count. */
+    cgm_logstore_clear(&again, 2);
+    for (int i = 0; i < per; i++) {
+        e.pos = 1000u + (uint32_t)i;
+        cgm_logstore_append(&again, &e);
+    }
+    cgm_logstore_open(&ls, &nor_flash, CGM_FLASH_SECTOR, 2 * CGM_FLASH_SECTOR, 2);
+    CHECK(ls.count == (uint32_t)per);
+    /* Full: appends refused, nothing past the end written. */
+    for (int i = 0; i < per; i++) {
+        cgm_logstore_append(&ls, &e);
+    }
+    CHECK(ls.full && !cgm_logstore_append(&ls, &e) && ls.count == 2u * (uint32_t)per);
+    CHECK(nor[0] == 0 && nor[3 * CGM_FLASH_SECTOR] == 0); /* outside the region: untouched */
+}
+
+static void test_backtest(void)
+{
+    test_backtest_parse();
+    test_backtest_play();
+    test_backtest_same_runs();
+    test_backtest_log();
+    test_backtest_logstore();
 }

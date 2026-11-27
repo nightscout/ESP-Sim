@@ -7,3 +7,6 @@ phy_init,  data, phy,     0xf000,   0x1000
 otadata,   data, ota,     0x10000,  0x2000
 ota_0,     app,  ota_0,   0x20000,  0x300000
 ota_1,     app,  ota_1,   0x320000, 0x300000
+# The CGM's backtest (CONFIG_ESPSIM_CGM_BACKTEST): 64 KB of trace, then its log.
+# After the app slots, so adding it moves nothing above.
+backtest,  data, 0x40,    0x620000, 0x80000

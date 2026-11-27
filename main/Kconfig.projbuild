@@ -23,6 +23,21 @@ config ESPSIM_AP_PASSWORD
         (WPA2). The same on every board built with it, and in the README:
         it keeps strangers from joining by accident, it is not a secret.
 
+config ESPSIM_CGM_BACKTEST
+    bool "CGM backtest mode"
+    default y
+    help
+        A third way for the simulated CGM to make glucose, beside the
+        virtual person and a fixed value: replay a trace uploaded on the
+        CGM page, reading by reading, whatever the pump does, and log what
+        the pump did against each reading, to compare two builds of an AID
+        algorithm on the same glucose. The trace and the log go in the
+        "backtest" flash partition (partitions.csv); a board whose
+        partition table predates it (updated only over Wi-Fi) keeps a
+        smaller trace and log in RAM, lost on a restart.
+        Off: the CGM page shows no backtest mode, and the board keeps no
+        trace.
+
 choice ESPSIM_MEDTRUM_MODEL
     prompt "Default Medtrum model"
     default ESPSIM_MEDTRUM_200

@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "dash.h" /* dash_aes128_encrypt_block, dash_random */
+#include "backtest.h"
 #include "person.h"
 
 #define G6_WARMUP (2 * 3600)
@@ -283,7 +284,8 @@ static const cgm_reading_t *latest(const cgm_t *c)
     return c->st.n_hist ? &c->st.hist[c->st.n_hist - 1] : NULL;
 }
 
-static void make_reading(cgm_t *c, uint32_t n, int64_t now)
+/* Makes reading n; false when there is none to make (backtest: a missing one). */
+static bool make_reading(cgm_t *c, uint32_t n, int64_t now)
 {
     cgm_state_t *st = &c->st;
     cgm_reading_t r = {
@@ -305,6 +307,11 @@ static void make_reading(cgm_t *c, uint32_t n, int64_t now)
             }
         }
         r.trend = (int8_t)(trend > 80 ? 80 : trend < -80 ? -80 : trend);
+    } else if (st->pattern == CGM_PATTERN_BACKTEST) {
+        /* The stored trace: the same readings whatever the pump does. */
+        if (!backtest_reading(c, r.t, r.state == CGM_STATE_OK, &st->glucose, &r.trend)) {
+            return false;
+        }
     }
     if (r.state == CGM_STATE_OK) {
         r.glucose = st->glucose;
@@ -322,6 +329,7 @@ static void make_reading(cgm_t *c, uint32_t n, int64_t now)
     st->hist[st->n_hist++] = r;
     logf_(c, "reading %u: %u mg/dL, state %u%s", (unsigned)r.seq, r.glucose, r.state,
           st->signal_loss ? " (signal loss: not sent)" : "");
+    return true;
 }
 
 void cgm_init(cgm_t *c, const cgm_state_t *st, const cgm_io_t *io)
@@ -344,13 +352,18 @@ void cgm_tick(cgm_t *c)
     if (st->pattern == CGM_PATTERN_PERSON) {
         person_advance(c, now); /* a step a minute, between readings too */
     }
+    backtest_watch_pump(c);
     uint32_t n = now > st->activated ? (uint32_t)((now - st->activated) / CGM_READING_INTERVAL) : 0;
     if (st->n_hist == 0 || n >= st->next_n) {
-        make_reading(c, n, now);
-        st->next_n = n + 1;
-        save(c);
-        c->window_end = now + WINDOW;
-        c->rx_until = c->window_end; /* until a link ends: either slot may come first */
+        bool made = make_reading(c, n, now);
+        if (made || st->next_n != n + 1) {
+            st->next_n = n + 1;
+            save(c);
+        }
+        if (made) {
+            c->window_end = now + WINDOW;
+            c->rx_until = c->window_end; /* until a link ends: either slot may come first */
+        }
     }
     const cgm_reading_t *r = latest(c);
     bool app_due = r && r->seq != st->delivered;
@@ -763,6 +776,7 @@ void cgm_new_sensor(cgm_t *c, cgm_kind_t kind, const char *id)
     fresh.icr = c->st.icr;
     fresh.basal_need = c->st.basal_need;
     fresh.person = c->st.person;
+    fresh.bt = c->st.bt; /* the stored trace and where it is */
     c->st = fresh;
     save(c);
     char name[16];
@@ -844,6 +858,16 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
                      person ? cgm_person_glucose(c) : 0, person ? (double)person_insulin_acting(c) : 0.0,
                      (long long)next_t, next_g, next_t ? cgm_food_name(next_f) : "", (long long)last_t, last_g,
                      last_t ? cgm_food_name(last_f) : "");
+    if (k < 0 || (size_t)(n + k) >= cap) {
+        return 0;
+    }
+    n += k;
+    const cgm_backtest_t *bt = &st->bt;
+    k = snprintf(out + n, cap - n,
+                 ",\"backtest\":{\"len\":%u,\"sum\":\"%08x\",\"pos\":%u,\"cur\":%u,\"run\":%u,\"loops\":%u,"
+                 "\"play\":%u,\"end\":%u,\"hold\":%u,\"next\":%lld}",
+                 (unsigned)bt->len, (unsigned)bt->sum, (unsigned)bt->pos, (unsigned)bt->cur, (unsigned)bt->run,
+                 (unsigned)bt->loops, bt->play, bt->end, bt->hold, (long long)cgm_backtest_next(c));
     if (k < 0 || (size_t)(n + k) >= cap) {
         return 0;
     }
