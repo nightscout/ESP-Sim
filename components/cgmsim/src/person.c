@@ -4,8 +4,10 @@
  *
  *   rise   the liver's output, which basal insulin normally balances
  *          (more before dawn), and carbohydrate from meals as it absorbs;
- *   fall   insulin as it acts (a rapid-acting curve peaking at 75 minutes and
- *          lasting about 6 hours), stronger during and after exercise;
+ *   fall   insulin as it acts (the exponential curve oref and Loop use for
+ *          rapid-acting insulin: peak at 75 minutes, all acted by 6 hours, so a
+ *          dose acts when the AID expects it to), stronger during and after
+ *          exercise;
  *   drift  a slow random wander (hormones, stress, everything unmodelled);
  *   sensor noise on top of the true value.
  *
@@ -29,8 +31,8 @@
 #include "cgm.h"
 #include "person.h"
 
-#define TAU_INSULIN 75.0f /* minutes: the insulin curve's peak */
-#define HORIZON 420       /* minutes of insulin kept (CGM_INSULIN_BUCKETS × 5) */
+#define INSULIN_PEAK 75.0f /* minutes: the insulin's peak activity */
+#define INSULIN_DIA 360.0f /* minutes: all of it has acted (within the 7 hours kept) */
 
 /* ---- randomness ------------------------------------------------------------------- */
 
@@ -72,6 +74,46 @@ static float curve(float t, float tau)
         return 0;
     }
     return t / (tau * tau) * expf(-t / tau);
+}
+
+/* Rapid-acting insulin, as oref and LoopKit model it (ExponentialInsulinModel):
+ * activity S/τ² · t · (1 − t/D) · e^(−t/τ) over the duration D, with τ and S
+ * set by the peak and D so that it peaks there and integrates to 1. */
+typedef struct {
+    float tau, a, s;
+} insulin_model_t;
+
+static insulin_model_t insulin_model(void)
+{
+    const float tp = INSULIN_PEAK, td = INSULIN_DIA;
+    insulin_model_t m;
+    m.tau = tp * (1.0f - tp / td) / (1.0f - 2.0f * tp / td);
+    m.a = 2.0f * m.tau / td;
+    m.s = 1.0f / (1.0f - m.a + (1.0f + m.a) * expf(-td / m.tau));
+    return m;
+}
+
+/* The fraction of a dose acting in minute t. */
+static float insulin_activity(const insulin_model_t *m, float t)
+{
+    if (t <= 0 || t >= INSULIN_DIA) {
+        return 0;
+    }
+    return m->s / (m->tau * m->tau) * t * (1.0f - t / INSULIN_DIA) * expf(-t / m->tau);
+}
+
+/* The fraction of a dose not yet acted at age t. */
+static float insulin_remaining(const insulin_model_t *m, float t)
+{
+    if (t <= 0) {
+        return 1;
+    }
+    if (t >= INSULIN_DIA) {
+        return 0;
+    }
+    float r = 1.0f - m->s * (1.0f - m->a) *
+                         ((t * t / (m->tau * INSULIN_DIA * (1.0f - m->a)) - t / m->tau - 1.0f) * expf(-t / m->tau) + 1.0f);
+    return r < 0 ? 0 : r > 1 ? 1 : r;
 }
 
 static int64_t local_seconds(const cgm_t *c, int64_t t)
@@ -318,16 +360,14 @@ static void step(cgm_t *c, int64_t minute)
     }
 
     /* Insulin acting now. */
+    insulin_model_t im = insulin_model();
     float acting = 0;
     for (int i = 0; i < CGM_INSULIN_BUCKETS; i++) {
         if (p->ins[i]) {
             float age = (float)(minute - (p->ins_bucket - i) * 5) + 2.5f;
-            acting += p->ins[i] / 100.0f * curve(age, TAU_INSULIN);
+            acting += p->ins[i] / 100.0f * insulin_activity(&im, age);
         }
     }
-    /* The curve's tail beyond the 7 hours kept: scaled back in, so a unit
-     * still lowers by one ISF. */
-    acting /= 1.0f - (1.0f + HORIZON / TAU_INSULIN) * expf(-HORIZON / TAU_INSULIN);
     /* Carbohydrate absorbing now. */
     float carbs = 0;
     for (int i = 0; i < CGM_MEALS; i++) {
@@ -443,13 +483,27 @@ float person_insulin_acting(const cgm_t *c)
 {
     /* Insulin on board: what has not yet acted, units. */
     const cgm_person_t *p = &c->st.person;
+    insulin_model_t im = insulin_model();
     float iob = 0;
     for (int i = 0; i < CGM_INSULIN_BUCKETS; i++) {
         if (p->ins[i]) {
             float age = (float)(p->minute - (p->ins_bucket - i) * 5) + 2.5f;
-            float a = age / TAU_INSULIN;
-            iob += p->ins[i] / 100.0f * (age <= 0 ? 1.0f : (1.0f + a) * expf(-a));
+            iob += p->ins[i] / 100.0f * insulin_remaining(&im, age);
         }
     }
     return iob;
+}
+
+float person_insulin_basal(const cgm_t *c)
+{
+    /* What a steady basal at the basal need keeps on board: the rate times the
+     * time a unit stays on board. An AID counts its IOB above its scheduled
+     * basal, so the panel shows the person's IOB less this too. */
+    insulin_model_t im = insulin_model();
+    float minutes = 0;
+    for (int t = 0; t < (int)INSULIN_DIA; t++) {
+        minutes += insulin_remaining(&im, (float)t + 0.5f);
+    }
+    float need = (c->st.basal_need ? c->st.basal_need : 80) / 100.0f / 60.0f;
+    return need * minutes;
 }

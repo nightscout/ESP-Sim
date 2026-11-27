@@ -838,10 +838,10 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
     int64_t last_t = person ? person_last_meal(c, now, &last_g, &last_f) : 0;
     int k = snprintf(out + n, cap - n,
                      ",\"pattern\":%u,\"insulinSource\":%u,\"isf\":%u,\"icr\":%u,\"basalNeed\":%u,"
-                     "\"trueGlucose\":%d,\"iob\":%.2f,\"nextMeal\":%lld,\"nextMealGrams\":%u,\"nextFood\":\"%s\","
+                     "\"trueGlucose\":%d,\"iob\":%.2f,\"iobBasal\":%.2f,\"nextMeal\":%lld,\"nextMealGrams\":%u,\"nextFood\":\"%s\","
                      "\"lastMeal\":%lld,\"lastMealGrams\":%u,\"lastFood\":\"%s\"",
                      st->pattern, st->insulin_source, st->isf, st->icr, st->basal_need,
-                     person ? cgm_person_glucose(c) : 0, person ? (double)person_insulin_acting(c) : 0.0,
+                     person ? cgm_person_glucose(c) : 0, person ? (double)person_insulin_acting(c) : 0.0, person ? (double)person_insulin_basal(c) : 0.0,
                      (long long)next_t, next_g, next_t ? cgm_food_name(next_f) : "", (long long)last_t, last_g,
                      last_t ? cgm_food_name(last_f) : "");
     if (k < 0 || (size_t)(n + k) >= cap) {

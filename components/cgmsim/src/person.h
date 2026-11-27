@@ -11,3 +11,4 @@ void person_exercise(cgm_t *c, int64_t now, uint16_t minutes);
 int64_t person_next_meal(const cgm_t *c, int64_t now, uint16_t *grams, uint8_t *food);
 int64_t person_last_meal(const cgm_t *c, int64_t now, uint16_t *grams, uint8_t *food);
 float person_insulin_acting(const cgm_t *c); /* insulin on board, units */
+float person_insulin_basal(const cgm_t *c);  /* what the basal need alone keeps on board, units */

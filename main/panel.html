@@ -199,7 +199,7 @@
         <button id="cgmExercise">Exercise now (45 min)</button>
       </div>
       <div id="cgmPersonInfo" class="muted" style="margin-top:8px"></div>
-      <div class="muted" style="margin-top:8px">The virtual person eats on their own (breakfast, lunch, dinner, snacks from a list of foods), treats their own lows and sometimes exercises; their glucose follows the insulin they get. “From the simulated pump” means only what the pod, YpsoPump or patch delivers, so the AID's decisions show in the glucose. A toy model for testing software, not a physiological simulator.</div>
+      <div class="muted" style="margin-top:8px">The virtual person eats on their own (breakfast, lunch, dinner, snacks from a list of foods), treats their own lows and sometimes exercises; their glucose follows the insulin they get, which acts on the curve AIDs assume for rapid-acting insulin (peak 75 minutes, gone by 6 hours). Insulin on board is shown above the basal need, as an AID counts it above its scheduled basal. “From the simulated pump” means only what the pod, YpsoPump or patch delivers, so the AID's decisions show in the glucose. A toy model for testing software, not a physiological simulator.</div>
     </div>
 
     <div class="subbox" id="modeFixed" hidden>
@@ -443,7 +443,12 @@ function showPerson(c){
   if(!cgmEdited.cgmTrendIn && document.activeElement!==$('cgmTrendIn')) $('cgmTrendIn').value = c.trend/10;
   modeView(kind);
   if(kind!=='person'){ $('cgmPersonInfo').textContent=''; return; }
-  const parts = ['True glucose '+c.trueGlucose+' mg/dL', 'insulin on board '+c.iob.toFixed(2)+' U'];
+  /* An AID shows its IOB above its scheduled basal: so does this, above the
+   * person's basal need, beside the whole amount. */
+  const net = c.iobBasal != null ? c.iob - c.iobBasal : null;
+  const parts = ['True glucose '+c.trueGlucose+' mg/dL',
+    net != null ? 'insulin on board '+(net>=0?'':'−')+Math.abs(net).toFixed(2)+' U above the basal need ('+c.iob.toFixed(2)+' U in all)'
+                : 'insulin on board '+c.iob.toFixed(2)+' U'];
   if(c.lastMeal) parts.push('last ate '+c.lastFood+' ('+c.lastMealGrams+' g) at '+hm(c.lastMeal));
   if(c.nextMeal) parts.push('next: '+c.nextFood+' ('+c.nextMealGrams+' g) around '+hm(c.nextMeal));
   $('cgmPersonInfo').textContent = parts.join(' · ');

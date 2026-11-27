@@ -716,6 +716,67 @@ static void test_person(void)
         CHECK(got > 80 && got < 180);
     }
 
+    /* The insulin acts as an AID expects (oref's and Loop's rapid-acting
+     * curve: peak 75 minutes, gone by 6 hours). Two runs of the same person,
+     * one with a 1 U bolus: the difference is the bolus's effect. */
+    {
+        static cgm_t c[2];
+        static cgm_io_t io;
+        io = fio;
+        io.utc_offset = f_utc;
+        io.pump_insulin = f_pump;
+        double iob[2][5] = {{0}}, iob_basal = 0;
+        int g[2][5] = {{0}};
+        static const int at[5] = {60, 120, 240, 360, 0};
+        for (int r = 0; r < 2; r++) {
+            memset(&fk, 0, sizeof fk);
+            fk.now = 1800000000 - 1800000000 % 86400 + 2 * 3600; /* 2 am: no meals for hours */
+            pump_total = 0;
+            cgm_state_t st;
+            cgm_state_fresh(&st, CGM_G6, NULL, fk.now);
+            st.person.rng = 12345;
+            cgm_init(&c[r], &st, &io);
+            cgm_skip_warmup(&c[r]);
+            cgm_set_glucose(&c[r], 250, 0);
+            cgm_set_pattern(&c[r], CGM_PATTERN_PERSON, CGM_INSULIN_PUMP, 40, 10, 80);
+            c[r].st.person.drift = 0;
+            c[r].st.person.planned_day = (fk.now) / 86400; /* no meals planned */
+            memset(c[r].st.person.meals, 0, sizeof c[r].st.person.meals);
+            run(&c[r], 60);
+            if (r) {
+                pump_total += 100; /* the bolus */
+            }
+            int k = 0;
+            for (int m = 1; m <= 360; m++) {
+                for (int s = 0; s < 60; s++) {
+                    fk.now++;
+                    pump_total += s == 0 && m % 3 == 0 ? 4 : 0; /* 0.80 U/h, the basal need */
+                    cgm_tick(&c[r]);
+                }
+                if (m == at[k]) {
+                    char js[1800];
+                    cgm_status_json(&c[r], js, sizeof js);
+                    const char *q = strstr(js, "\"iob\":");
+                    iob[r][k] = q ? atof(q + 6) : -1;
+                    q = strstr(js, "\"iobBasal\":");
+                    iob_basal = q ? atof(q + 11) : -1;
+                    g[r][k] = cgm_person_glucose(&c[r]);
+                    k++;
+                }
+            }
+        }
+        double d60 = iob[1][0] - iob[0][0], d120 = iob[1][1] - iob[0][1], d240 = iob[1][2] - iob[0][2];
+        printf("  1 U bolus, ISF 40: on board %.2f, %.2f, %.2f U at 1, 2, 4 h; lowered %d, %d, %d, %d mg/dL by 1, 2, 4, 6 h\n",
+               d60, d120, d240, g[0][0] - g[1][0], g[0][1] - g[1][1], g[0][2] - g[1][2], g[0][3] - g[1][3]);
+        CHECK(fabs(d60 - 0.765) < 0.04);  /* LoopKit's ExponentialInsulinModel(360, 75) */
+        CHECK(fabs(d120 - 0.437) < 0.04);
+        CHECK(fabs(d240 - 0.069) < 0.03);
+        CHECK(abs((g[0][1] - g[1][1]) - 23) <= 3); /* 56 % of one ISF by 2 hours */
+        CHECK(abs((g[0][3] - g[1][3]) - 40) <= 2); /* all of it by 6 hours */
+        /* A steady 0.80 U/h keeps 0.80 / 60 × 121 minutes on board. */
+        CHECK(fabs(iob_basal - 1.62) < 0.03);
+    }
+
     /* The food names. */
     CHECK(strcmp(cgm_food_name(0), "porridge with banana") == 0);
 }
