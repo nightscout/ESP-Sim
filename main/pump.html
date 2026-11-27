@@ -319,6 +319,20 @@
         <option value="5">100 %</option><option value="4">80 %</option><option value="3">60 %</option><option value="2">40 %</option><option value="1">20 %</option><option value="0">0 % (empty)</option><option value="6">invalid</option></select></div>
       <div style="flex:0"><button class="primary" id="ypSet">Set</button></div>
     </div>
+    <h3 style="margin:16px 0 4px;font-size:15px">Change the cartridge</h3>
+    <div class="muted">As on the pump: suspend it first, then put in a new cartridge (the pump rewinds), prime the tubing and fill the cannula. Each is logged in the pump's history with its amount, for the app to read. The primes come out of the cartridge. Resume the pump when you're done.</div>
+    <div class="row">
+      <div><label for="ypCartIn">New cartridge (U)</label><input type="number" id="ypCartIn" min="0.01" max="300" step="0.01" value="160"></div>
+      <div style="flex:0"><button id="ypCart">New cartridge</button></div>
+    </div>
+    <div class="row">
+      <div><label for="ypLineIn">Prime line (U)</label><input type="number" id="ypLineIn" min="0.01" max="300" step="0.01" value="10"></div>
+      <div style="flex:0"><button id="ypLine">Prime line</button></div>
+    </div>
+    <div class="row">
+      <div><label for="ypCanIn">Fill cannula (U)</label><input type="number" id="ypCanIn" min="0.01" max="300" step="0.01" value="0.3"></div>
+      <div style="flex:0"><button id="ypCan">Fill cannula</button></div>
+    </div>
     <div class="actions">
       <button id="ypSuspend">Suspend</button>
       <button id="ypReboot">Restart the pump (reboot counter +1)</button>
@@ -699,6 +713,14 @@ refresh(); setInterval(refresh, 1000);
     await send({command:'ypsoReservoir', hundredths: r==='' ? -1 : Math.round(+r*100)}, 'Reservoir set');
     const j = await send({command:'ypsoBattery', level:+$('ypBatIn').value}, 'Battery set'); if(j) show(j);
   };
+  async function priming(command, input, done){
+    const u = +$(input).value;
+    if(!(u > 0)){ say('Enter an amount in units'); return; }
+    const j = await send({command, hundredths: Math.round(u*100)}, done+' '+u.toFixed(2)+' U'); if(j) show(j);
+  }
+  $('ypCart').onclick = ()=>priming('ypsoCartridge', 'ypCartIn', 'New cartridge:');
+  $('ypLine').onclick = ()=>priming('ypsoPrimeLine', 'ypLineIn', 'Line primed:');
+  $('ypCan').onclick = ()=>priming('ypsoFillCannula', 'ypCanIn', 'Cannula filled:');
   $('ypSuspend').onclick = async ()=>{
     const on = !(last && last.suspended);
     const j = await send({command:'ypsoSuspend', on:on}, on ? 'Suspended' : 'Resumed'); if(j) show(j);
@@ -725,14 +747,15 @@ refresh(); setInterval(refresh, 1000);
     $('ypPassBox').hidden = !y.passkey; $('ypPasskey').textContent = y.passkey || '—';
     if(document.activeElement!==$('ypOpen')) $('ypOpen').checked = !!y.open;
     $('ypRes').textContent = y.reservoir < 0 ? 'no cartridge' : u2(y.reservoir);
-    chip($('ypState'), y.suspended ? 'suspended' : 'running', y.suspended ? 'warn' : 'ok');
+    const empty = y.suspended && y.reservoir === 0 && y.lastAlarm === 104;
+    chip($('ypState'), empty ? 'cartridge empty' : y.suspended ? 'suspended' : 'running', y.suspended ? 'warn' : 'ok');
     $('ypFw').textContent = y.firmware;
     $('ypPhone').textContent = !y.connected ? 'not connected' : y.authorized ? 'connected, authorised' : y.open ? 'connected (let in without a password)' : 'connected, not authorised';
     $('ypBasal').textContent = u2(y.basalNow)+' U/h';
     $('ypTbr').textContent = y.tbrPercent===100 ? 'none' : y.tbrPercent+' %, '+y.tbrLeft+' min left';
     $('ypBolus').textContent = y.bolusActive ? u2(y.bolusDelivered)+' of '+u2(y.bolusTotal)+' U' : 'none';
     $('ypExt').textContent = y.extendedActive ? u2(y.extendedDelivered)+' of '+u2(y.extendedTotal)+' U' : 'none';
-    $('ypCounters').textContent = 'reboot '+y.reboot+', read '+y.readCounter+', write '+y.writeCounter+', '+y.events+' history entries';
+    $('ypCounters').textContent = 'reboot '+y.reboot+', read '+y.readCounter+', write '+y.writeCounter+', '+y.events+' history entries, '+y.alarms+' alarms';
     $('ypSuspend').textContent = y.suspended ? 'Resume' : 'Suspend';
     if(document.activeElement!==$('ypResIn')) $('ypResIn').value = y.reservoir < 0 ? '' : u2(y.reservoir);
     if(document.activeElement!==$('ypBatIn')) $('ypBatIn').value = String(y.battery);

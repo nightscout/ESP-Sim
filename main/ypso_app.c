@@ -258,6 +258,18 @@ const char *ypso_app_command(const char *body, char *reply, size_t cap)
             return "hundredths is -1 (no cartridge) to 30000 (300 U)";
         }
         LOCKED(ypso_set_reservoir(&pump, (int32_t)v));
+    } else if (command_is(body, "ypsoCartridge") || command_is(body, "ypsoPrimeLine") ||
+               command_is(body, "ypsoFillCannula")) {
+        if (!json_number(body, "hundredths", &v) || v < 1 || v > 30000) {
+            return "hundredths is 1 to 30000 (0.01 to 300 U)";
+        }
+        const char *no;
+        LOCKED(no = command_is(body, "ypsoCartridge")   ? ypso_change_cartridge(&pump, (int32_t)v)
+                    : command_is(body, "ypsoPrimeLine") ? ypso_prime_line(&pump, (int32_t)v)
+                                                        : ypso_fill_cannula(&pump, (int32_t)v));
+        if (no) {
+            return no;
+        }
     } else if (command_is(body, "ypsoBattery")) {
         if (!json_number(body, "level", &v) || v < 0 || v > 6) {
             return "level is 0 to 5 (×20 %), or 6 (invalid)";

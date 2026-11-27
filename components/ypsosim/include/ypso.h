@@ -141,6 +141,7 @@ enum {
 
 #define YPSO_STATE_VERSION 1
 #define YPSO_EVENTS 160
+#define YPSO_ALARMS 32
 #define YPSO_PKT 20       /* a frame: one header byte, up to 19 payload */
 #define YPSO_MSG_MAX 160  /* the largest sealed message: 44 + 52 rounded up */
 
@@ -194,6 +195,10 @@ typedef struct {
     uint8_t server_priv[32];   /* the server key this pump trusts, made at random on the board */
     uint64_t kx_counter;       /* the last key exchange's counter: the next must be greater */
     uint32_t tbr_seq;          /* the running temp basal's history entry (its _RUNNING record) */
+    /* The alarm log. Added later: a state saved before has none. */
+    uint32_t alarm_seq;
+    uint16_t n_alarms;
+    ypso_event_t alarms[YPSO_ALARMS]; /* oldest first */
 } ypso_state_t;
 
 typedef struct {
@@ -228,6 +233,7 @@ typedef struct {
     bool challenge_set;
     int64_t last_tick, last_save;
     bool dirty;
+    bool ran_dry;                /* the reservoir reached 0 this tick */
 } ypso_t;
 
 /* A new pump: fresh serial, key and password; full reservoir; a flat 0.80 U/h profile. */
@@ -247,6 +253,13 @@ int ypso_on_write(ypso_t *y, ypso_chr_t c, const uint8_t *p, size_t n);
 void ypso_set_reservoir(ypso_t *y, int32_t hundredths);
 void ypso_set_battery(ypso_t *y, uint8_t level);
 void ypso_set_suspended(ypso_t *y, bool on);
+/* A cartridge change, done on the pump while it is stopped, in hundredths of a
+ * unit: the new cartridge (a rewind), then filling the tubing (a line prime)
+ * and the cannula. Each is a history entry the app reads, with its amount;
+ * the primes come out of the reservoir. NULL, or why the pump refuses. */
+const char *ypso_change_cartridge(ypso_t *y, int32_t hundredths);
+const char *ypso_prime_line(ypso_t *y, int32_t hundredths);
+const char *ypso_fill_cannula(ypso_t *y, int32_t hundredths);
 /* Open: the pump lets the phone in without its password, or with any
  * password, so an app with no credentials for it works at once. Closed: like
  * a real pump, only its own password. */

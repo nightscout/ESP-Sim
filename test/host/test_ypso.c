@@ -595,6 +595,49 @@ static void test_ypso_key_exchange(void)
     CHECK(read_offer(&y, offer) == YPSO_ATT_INSUFFICIENT_AUTHORIZATION);
 }
 
+/* A cartridge change, done on the pump: refused while it runs; then a rewind,
+ * a line prime and a cannula fill, each a history entry with its amount (the
+ * primes out of the reservoir). Running dry is a "cartridge empty" alarm, and
+ * the pump stops. */
+static void test_ypso_cartridge(void)
+{
+    static ypso_t y;
+    ypso_state_t st;
+    ypso_state_fresh(&st, YPSO_FW_V65);
+    ypso_init(&y, &st, &yio);
+    phone_t ph = {.y = &y, .encrypted = false};
+    ypso_on_connect(&y);
+    CHECK(ypso_on_write(&y, YC_AUTH_PASSWORD, st.password, 16) == 0);
+    uint8_t v[64];
+    size_t n;
+    /* Running: refused. */
+    CHECK(ypso_change_cartridge(&y, 16000) != NULL);
+    CHECK(ypso_prime_line(&y, 1000) != NULL);
+    /* Runs dry: 0.02 U at 0.80 U/h is 90 s. */
+    ypso_set_reservoir(&y, 2);
+    run(&y, 120);
+    CHECK(y.st.reservoir == 0 && y.st.suspended);
+    CHECK(ph_read(&ph, YC_ALARM_COUNT, v, &n) == 0 && n == 8 && le32(v) == 1);
+    uint8_t idx[2] = {0, 0};
+    CHECK(ph_write(&ph, YC_ALARM_INDEX, idx, 2) == 0);
+    CHECK(ph_read(&ph, YC_ALARM_VALUE, v, &n) == 0 && n == 19 && v[4] == 104);
+    /* Stopped: a prime needs a cartridge with that much in it. */
+    CHECK(ypso_prime_line(&y, 1000) != NULL);
+    CHECK(ypso_change_cartridge(&y, 16000) == NULL && y.st.reservoir == 16000);
+    CHECK(ypso_prime_line(&y, 1000) == NULL);
+    CHECK(ypso_fill_cannula(&y, 30) == NULL);
+    CHECK(y.st.reservoir == 16000 - 1000 - 30);
+    CHECK(ypso_fill_cannula(&y, 20000) != NULL);
+    /* Newest first: cannula (25) 0.30 U, line (4) 10.00 U, rewind (16). */
+    CHECK(ph_write(&ph, YC_EVENT_INDEX, idx, 2) == 0);
+    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 25 && (v[5] | v[6] << 8) == 30);
+    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 4 && (v[5] | v[6] << 8) == 1000);
+    CHECK(ph_read(&ph, YC_EVENT_VALUE, v, &n) == 0 && v[4] == 16);
+    /* Taking the cartridge out: a "no cartridge" alarm. */
+    ypso_set_reservoir(&y, -1);
+    CHECK(y.st.n_alarms == 2 && y.st.alarms[1].type == 103);
+}
+
 /* RFC 7693 and RFC 9106 test vectors. */
 void test_ypso_all(void)
 {
@@ -602,6 +645,7 @@ void test_ypso_all(void)
     test_ypso_encrypted();
     test_ypso_clear();
     test_ypso_open();
+    test_ypso_cartridge();
     test_ypso_clock();
     test_ypso_key_exchange();
 }

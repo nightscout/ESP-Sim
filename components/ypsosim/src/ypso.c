@@ -433,19 +433,28 @@ enum {
     EV_BOLUS_DELAYED_RUNNING = 1,
     EV_BOLUS_IMMEDIATE = 2,
     EV_BOLUS_DELAYED = 3,
+    EV_PRIMING_FINISHED = 4,
     EV_BASAL_A_CHANGED = 7,
     EV_TBR_RUNNING = 9,
     EV_TBR = 10,
     EV_DATE_CHANGED = 12,
     EV_TIME_CHANGED = 13,
     EV_PUMP_MODE_CHANGED = 14,
+    EV_REWIND_FINISHED = 16,
     EV_BOLUS_COMBINED_RUNNING = 17,
     EV_BOLUS_COMBINED = 18,
     EV_BOLUS_IMMEDIATE_RUNNING = 19,
+    EV_CANNULA_PRIMING_FINISHED = 25,
     EV_BOLUS_IMMEDIATE_ABORT = 29,
     EV_BOLUS_DELAYED_ABORT = 30,
     EV_BOLUS_COMBINED_ABORT = 31,
     EV_TBR_ABORT = 32,
+};
+
+/* The alarm log's entry types (the Lotus YpsoPump driver, YpsoPump.kt ALARM_*). */
+enum {
+    AL_NO_CARTRIDGE = 103,
+    AL_CARTRIDGE_EMPTY = 104,
 };
 
 /* A new history entry, stamped now. Its sequence. */
@@ -465,6 +474,22 @@ static uint32_t event(ypso_t *y, uint8_t type, uint16_t a, uint16_t b, uint16_t 
     e->v[2] = c;
     y->dirty = true;
     return e->seq;
+}
+
+/* A new alarm log entry, stamped now. */
+static void log_alarm(ypso_t *y, uint8_t type)
+{
+    ypso_state_t *st = &y->st;
+    if (st->n_alarms == YPSO_ALARMS) {
+        memmove(st->alarms, st->alarms + 1, sizeof st->alarms[0] * (YPSO_ALARMS - 1));
+        st->n_alarms--;
+    }
+    ypso_event_t *e = &st->alarms[st->n_alarms++];
+    memset(e, 0, sizeof *e);
+    e->t = pump_t2000(y);
+    e->seq = ++st->alarm_seq;
+    e->type = type;
+    y->dirty = true;
 }
 
 /* A bolus or temp basal ends: like the pump, written over its own _RUNNING
@@ -571,6 +596,7 @@ static void take(ypso_t *y, int32_t hundredths)
     st->delivered_total += (uint32_t)hundredths;
     if (st->reservoir > 0) {
         st->reservoir = st->reservoir > hundredths ? st->reservoir - hundredths : 0;
+        y->ran_dry |= st->reservoir == 0;
     }
 }
 
@@ -671,6 +697,13 @@ void ypso_tick(ypso_t *y)
     if (st->tbr_percent != 100 && now - st->tbr_start >= (int64_t)st->tbr_minutes * 60) {
         end_tbr(y, false);
     }
+    if (y->ran_dry) {
+        /* Like the pump: a "cartridge empty" alarm, and it stops. */
+        y->ran_dry = false;
+        log_alarm(y, AL_CARTRIDGE_EMPTY);
+        ylog(y, "cartridge empty: the pump stops");
+        ypso_set_suspended(y, true);
+    }
     /* Saved when something was logged, else at most once a minute. */
     if (y->dirty || now - y->last_save >= 60) {
         y->last_save = now;
@@ -747,6 +780,13 @@ static int log_of(ypso_chr_t c, int *kind)
         }
     }
     return -1;
+}
+
+/* How many entries a log holds: the event and alarm logs are kept, the system
+ * and complaint logs stay empty. */
+static int log_count(const ypso_t *y, int lg)
+{
+    return lg == 0 ? y->st.n_events : lg == 1 ? y->st.n_alarms : 0;
 }
 
 /* ---- settings (§5.1) ------------------------------------------------------------------- */
@@ -1030,7 +1070,7 @@ static int command(ypso_t *y, ypso_chr_t c, const uint8_t *p, size_t n)
             }
             idx = p[0] | p[1] << 8;
         }
-        int count = lg == 0 ? y->st.n_events : 0;
+        int count = log_count(y, lg);
         if (idx < 0 || idx >= count) {
             return YPSO_ENTRY_INDEX_INVALID;
         }
@@ -1101,7 +1141,7 @@ static int answer(ypso_t *y, ypso_chr_t c, uint8_t *out, size_t *n)
     int lg = log_of(c, &kind);
     int32_t v;
     if (lg >= 0) {
-        int count = lg == 0 ? y->st.n_events : 0;
+        int count = log_count(y, lg);
         if (kind == 0) {
             put_safevar(out, count);
             *n = 8;
@@ -1112,7 +1152,7 @@ static int answer(ypso_t *y, ypso_chr_t c, uint8_t *out, size_t *n)
             if (idx < 0 || idx >= count) {
                 return YPSO_ENTRY_INDEX_INVALID;
             }
-            entry_bytes(&y->st.events[count - 1 - idx], (uint16_t)idx, out);
+            entry_bytes(lg == 0 ? &y->st.events[count - 1 - idx] : &y->st.alarms[count - 1 - idx], (uint16_t)idx, out);
             y->index[lg] = idx + 1; /* §3.10: the index moves on after a value read */
             *n = 19;
             return YPSO_OK;
@@ -1338,8 +1378,75 @@ int ypso_on_write(ypso_t *y, ypso_chr_t c, const uint8_t *p, size_t n)
 
 void ypso_set_reservoir(ypso_t *y, int32_t hundredths)
 {
+    int32_t was = y->st.reservoir;
     y->st.reservoir = hundredths < -1 ? -1 : hundredths > 30000 ? 30000 : hundredths;
+    if (y->st.reservoir < 0 && was >= 0) {
+        log_alarm(y, AL_NO_CARTRIDGE);
+    }
     save(y);
+}
+
+/* The pump changes cartridges and primes only while it is stopped. */
+static const char *priming_refused(ypso_t *y, int32_t hundredths, bool from_reservoir)
+{
+    if (!y->st.suspended) {
+        return "stop (suspend) the pump first, as on the pump itself";
+    }
+    if (hundredths <= 0) {
+        return "the amount must be more than 0";
+    }
+    if (from_reservoir && y->st.reservoir < 0) {
+        return "there is no cartridge: change the cartridge first";
+    }
+    if (from_reservoir && hundredths > y->st.reservoir) {
+        return "there is not that much insulin in the cartridge";
+    }
+    return NULL;
+}
+
+const char *ypso_change_cartridge(ypso_t *y, int32_t hundredths)
+{
+    const char *no = priming_refused(y, hundredths, false);
+    if (no) {
+        return no;
+    }
+    if (hundredths > 30000) {
+        return "a cartridge holds at most 300 U here";
+    }
+    y->st.reservoir = hundredths;
+    event(y, EV_REWIND_FINISHED, 0, 0, 0);
+    ylog(y, "new cartridge (rewind): %d.%02d U", (int)hundredths / 100, (int)hundredths % 100);
+    save(y);
+    return NULL;
+}
+
+/* A prime: out of the reservoir, not into the body (no delivered total). The
+ * entry carries the amount in hundredths first (YpsoService.kt reads it with
+ * ypsoInsulinToU); the motion status and force after it stay 0. */
+static const char *prime(ypso_t *y, uint8_t type, int32_t hundredths, const char *what)
+{
+    const char *no = priming_refused(y, hundredths, true);
+    if (no) {
+        return no;
+    }
+    if (hundredths > 0xffff) {
+        return "too much for one prime";
+    }
+    y->st.reservoir -= hundredths;
+    event(y, type, (uint16_t)hundredths, 0, 0);
+    ylog(y, "%s: %d.%02d U", what, (int)hundredths / 100, (int)hundredths % 100);
+    save(y);
+    return NULL;
+}
+
+const char *ypso_prime_line(ypso_t *y, int32_t hundredths)
+{
+    return prime(y, EV_PRIMING_FINISHED, hundredths, "tubing primed");
+}
+
+const char *ypso_fill_cannula(ypso_t *y, int32_t hundredths)
+{
+    return prime(y, EV_CANNULA_PRIMING_FINISHED, hundredths, "cannula filled");
 }
 
 void ypso_set_battery(ypso_t *y, uint8_t level)
@@ -1399,7 +1506,7 @@ size_t ypso_status_json(ypso_t *y, char *out, size_t cap)
                      "\"reservoir\":%ld,\"battery\":%u,\"suspended\":%s,\"basalNow\":%ld,\"tbrPercent\":%ld,"
                      "\"tbrLeft\":%d,\"bolusActive\":%s,\"bolusDelivered\":%ld,\"bolusTotal\":%ld,"
                      "\"extendedActive\":%s,\"extendedDelivered\":%ld,\"extendedTotal\":%ld,\"reboot\":%u,"
-                     "\"readCounter\":%llu,\"writeCounter\":%llu,\"events\":%u,\"pumpTime\":%lld}",
+                     "\"readCounter\":%llu,\"writeCounter\":%llu,\"events\":%u,\"alarms\":%u,\"lastAlarm\":%u,\"pumpTime\":%lld}",
                      st->fw, ypso_fw(st->fw)->master, name, (unsigned)st->serial, y->connected ? "true" : "false",
                      y->authorized ? "true" : "false", y->open ? "true" : "false", (long)st->reservoir, st->battery,
                      st->suspended ? "true" : "false", (long)basal_now(y), (long)st->tbr_percent,
@@ -1407,6 +1514,7 @@ size_t ypso_status_json(ypso_t *y, char *out, size_t cap)
                      (long)st->imm.total, st->slow.seq ? "true" : "false",
                      (long)(st->slow.delivered + st->slow.now_delivered), (long)(st->slow.total + st->slow.now_total),
                      (unsigned)st->reboot, (unsigned long long)st->read_counter,
-                     (unsigned long long)st->write_counter, st->n_events, (long long)pump_now(y));
+                     (unsigned long long)st->write_counter, st->n_events, st->n_alarms,
+                     st->n_alarms ? st->alarms[st->n_alarms - 1].type : 0, (long long)pump_now(y));
     return n > 0 && (size_t)n < cap ? (size_t)n : 0;
 }
