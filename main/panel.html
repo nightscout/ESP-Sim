@@ -126,7 +126,8 @@
     <h2 id="h-cgm-sensor">Sensor <span class="chip" id="cgmState">—</span></h2>
     <div class="big">
       <span class="val" id="cgmGlucose">—</span>
-      <span class="unit">mg/dL last reading</span>
+      <span class="val sm" id="cgmArrow" aria-hidden="true"></span>
+      <span class="unit" id="cgmTrendTxt">mg/dL last reading</span>
     </div>
     <dl>
       <dt>Device</dt><dd id="cgmDevice">—</dd>
@@ -297,7 +298,7 @@ async function refreshBoard(){
     } else {
       oV('ovCgmName', KINDS[c.kind] || ('kind '+c.kind));
       oChip('ovCgmState', CGM_STATES[c.state] || ('state '+c.state), c.state===6 ? 'ok' : c.state===2 ? 'warn' : 'bad');
-      oV('ovCgmValue', (c.last && c.last.glucose ? c.last.glucose : c.glucose)+' mg/dL');
+      oV('ovCgmValue', (c.last && c.last.glucose ? c.last.glucose : c.glucose)+' mg/dL'+trendText(c.last).short);
       oV('ovCgmNote', (c.connected ? 'phone connected' : c.advertising ? 'advertising' : 'waiting')
         +' · '+(c.kind===7 ? 'code '+c.id : 'transmitter '+c.id));
     }
@@ -420,6 +421,8 @@ function showCgm(c){
   if(kind===6 && document.activeElement!==$('g6Id') && !$('g6Id').value) $('g6Id').value = c.id || '';
   if(kind===7) $('g7Pair').textContent = (c.name||'—')+(c.id? ', code '+c.id : '');
   $('cgmGlucose').textContent = c.last && c.last.glucose ? c.last.glucose : c.glucose;
+  const tt = trendText(c.last);
+  $('cgmArrow').textContent = tt.arrow; $('cgmTrendTxt').textContent = tt.text;
   const st = CGM_STATES[c.state] || ('state '+c.state);
   chip($('cgmState'), st+(c.forcedState?' (set)':''), c.state===6 ? 'ok' : c.state===2 ? 'warn' : 'bad');
   $('cgmDevice').textContent = kind===6 ? 'Dexcom G6, transmitter '+c.id+' ('+c.name+')' : 'Dexcom G7, '+c.name;
@@ -430,6 +433,22 @@ function showCgm(c){
   if(!cgmEdited.cgmStateIn) $('cgmStateIn').value = String(c.forcedState);
   $('cgmLoss').checked = c.signalLoss;
   showPerson(c);
+}
+/* The arrow a Dexcom shows for a rate of change (mg/dL a minute), and its name. */
+function trendArrow(tenths){
+  if(tenths==null) return ['', 'no trend'];
+  const r = tenths/10;
+  return r >= 3 ? ['⇈','rising quickly'] : r >= 2 ? ['↑','rising'] : r >= 1 ? ['↗','rising slowly']
+    : r > -1 ? ['→','steady'] : r > -2 ? ['↘','falling slowly'] : r > -3 ? ['↓','falling'] : ['⇊','falling quickly'];
+}
+const signed = (n, d)=> (n > 0 ? '+' : n < 0 ? '−' : '±')+Math.abs(n).toFixed(d||0);
+function trendText(l){
+  if(!l || !l.glucose) return {arrow:'', text:'mg/dL last reading', short:''};
+  const [arrow, name] = trendArrow(l.trend);
+  const parts = ['mg/dL last reading'];
+  if(l.trend!=null) parts.push(name+' ('+signed(l.trend/10, 1)+' mg/dL/min)');
+  if(l.delta!=null) parts.push(signed(l.delta)+' since the one before');
+  return {arrow, text: parts.join(' · '), short: (arrow ? ' '+arrow : '')+(l.delta!=null ? ' '+signed(l.delta) : '')};
 }
 function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
 

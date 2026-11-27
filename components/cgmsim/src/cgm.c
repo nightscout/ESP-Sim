@@ -848,9 +848,21 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
         return 0;
     }
     n += k;
+    /* The last reading's trend as the sensor sent it (tenths of mg/dL a
+     * minute; null: none), and the change from the reading 5 minutes before. */
+    char trend[8] = "null", delta[8] = "null";
+    if (r && r->glucose && r->trend != (int8_t)NO_TREND) {
+        snprintf(trend, sizeof trend, "%d", r->trend);
+    }
+    const cgm_reading_t *prev = st->n_hist >= 2 ? &st->hist[st->n_hist - 2] : NULL;
+    if (r && r->glucose && prev && prev->glucose && prev->seq + 1 == r->seq) {
+        snprintf(delta, sizeof delta, "%d", (int)r->glucose - (int)prev->glucose);
+    }
     int m = r ? snprintf(out + n, cap - n,
-                         ",\"last\":{\"seq\":%u,\"t\":%u,\"glucose\":%u,\"state\":%u,\"sent\":%s}}", (unsigned)r->seq,
-                         (unsigned)r->t, r->glucose, r->state, r->seq <= st->delivered ? "true" : "false")
+                         ",\"last\":{\"seq\":%u,\"t\":%u,\"glucose\":%u,\"state\":%u,\"sent\":%s,"
+                         "\"trend\":%s,\"delta\":%s}}",
+                         (unsigned)r->seq, (unsigned)r->t, r->glucose, r->state,
+                         r->seq <= st->delivered ? "true" : "false", trend, delta)
               : snprintf(out + n, cap - n, ",\"last\":null}");
     if (m < 0 || (size_t)(n + m) >= cap) {
         return 0;

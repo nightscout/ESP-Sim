@@ -574,7 +574,7 @@ static void test_status(void)
     cgm_state_fresh(&st, CGM_G7, NULL, fk.now);
     cgm_init(&c, &st, &fio);
     cgm_tick(&c);
-    char js[600];
+    char js[1800];
     size_t n = cgm_status_json(&c, js, sizeof js);
     CHECK(n > 0 && js[0] == '{' && js[n - 1] == '}');
     CHECK(strstr(js, "\"kind\":7") && strstr(js, "\"name\":\"DXCM"));
@@ -582,6 +582,19 @@ static void test_status(void)
     char want_now[32];
     snprintf(want_now, sizeof want_now, "\"now\":%lld,", (long long)fk.now);
     CHECK(strstr(js, want_now) != NULL);
+    /* In warm-up the reading has no glucose: no trend and no change. */
+    CHECK(strstr(js, "\"trend\":null,\"delta\":null}"));
+    /* The last reading's trend as sent, and the change from the one before:
+     * 2 mg/dL a minute is 10 mg/dL a reading. */
+    cgm_skip_warmup(&c);
+    cgm_set_glucose(&c, 120, 20);
+    run(&c, 2 * CGM_READING_INTERVAL);
+    cgm_status_json(&c, js, sizeof js);
+    CHECK(strstr(js, "\"state\":6,") && strstr(js, "\"trend\":20,\"delta\":10}"));
+    /* A missed reading between: the change is not known. */
+    c.st.hist[c.st.n_hist - 2].seq -= 1;
+    cgm_status_json(&c, js, sizeof js);
+    CHECK(strstr(js, "\"trend\":20,\"delta\":null}"));
     cgm_new_sensor(&c, CGM_G6, "81AB7Q");
     CHECK(c.st.kind == CGM_G6 && strcmp(c.st.id, "81AB7Q") == 0 && c.st.n_hist == 0);
     cgm_new_sensor(&c, CGM_OFF, NULL);
