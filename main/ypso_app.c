@@ -96,9 +96,21 @@ void ypso_app_start(void)
     mu = xSemaphoreCreateMutex();
     ypso_state_t st;
     if (!store_load_ypso(&st)) {
-        ypso_state_fresh(&st, YPSO_FW_V05);
+        /* Clear-text V65: what rockit pairs with. The encrypted V05 needs a
+         * server key that this board does not hand out yet. */
+        ypso_state_fresh(&st, YPSO_FW_V65);
         store_save_ypso(NULL, &st);
         ESP_LOGI(TAG, "a new YpsoPump");
+    }
+    /* A real pump's Bluetooth address is EC:2A:F0 and three bytes of
+     * serial - 10000000, so its serial is never above 26777215; rockit works
+     * the address out that way and refuses a pump it cannot. Bring a made-up
+     * serial outside that range inside it. */
+    if (st.serial < 10000000 || st.serial - 10000000 > 0xFFFFFF) {
+        uint32_t was = st.serial;
+        st.serial = 10000000 + st.serial % 0x1000000;
+        store_save_ypso(NULL, &st);
+        ESP_LOGW(TAG, "serial %08u has no real pump's address: now %08u", (unsigned)was, (unsigned)st.serial);
     }
     ypso_init(&pump, &st, &io);
     store_save_ypso(NULL, &pump.st); /* keeps a server key made for an older save */
