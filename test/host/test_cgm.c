@@ -578,6 +578,10 @@ static void test_status(void)
     size_t n = cgm_status_json(&c, js, sizeof js);
     CHECK(n > 0 && js[0] == '{' && js[n - 1] == '}');
     CHECK(strstr(js, "\"kind\":7") && strstr(js, "\"name\":\"DXCM"));
+    /* The board's clock, for the page's next-reading countdown. */
+    char want_now[32];
+    snprintf(want_now, sizeof want_now, "\"now\":%lld,", (long long)fk.now);
+    CHECK(strstr(js, want_now) != NULL);
     cgm_new_sensor(&c, CGM_G6, "81AB7Q");
     CHECK(c.st.kind == CGM_G6 && strcmp(c.st.id, "81AB7Q") == 0 && c.st.n_hist == 0);
     cgm_new_sensor(&c, CGM_OFF, NULL);

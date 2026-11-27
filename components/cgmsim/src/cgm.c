@@ -823,11 +823,11 @@ size_t cgm_status_json(cgm_t *c, char *out, size_t cap)
     int n = snprintf(out, cap,
                      "{\"kind\":%u,\"name\":\"%s\",\"id\":\"%s\",\"glucose\":%u,\"trend\":%d,\"state\":%u,"
                      "\"forcedState\":%u,\"signalLoss\":%s,\"activated\":%lld,\"sessionStart\":%lld,"
-                     "\"warmupDone\":%lld,\"connected\":%s,\"advertising\":%s,\"nextReading\":%lld",
+                     "\"warmupDone\":%lld,\"connected\":%s,\"advertising\":%s,\"nextReading\":%lld,\"now\":%lld",
                      st->kind, name, st->id, st->glucose, st->trend, cgm_current_state(st, now), st->forced_state,
                      st->signal_loss ? "true" : "false", (long long)st->activated, (long long)st->session_start,
                      (long long)st->warmup_done, c->connected ? "true" : "false", c->advertising ? "true" : "false",
-                     (long long)(st->activated + (int64_t)st->next_n * CGM_READING_INTERVAL));
+                     (long long)(st->activated + (int64_t)st->next_n * CGM_READING_INTERVAL), (long long)now);
     if (n < 0 || (size_t)n >= cap) {
         return 0;
     }

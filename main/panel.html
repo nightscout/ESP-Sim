@@ -337,7 +337,7 @@ function posixTZ(){
 /* ---- CGM ---- */
 const CGM_STATES = {1:'Stopped',2:'Warm-up',6:'OK',16:'Session failed',18:'Temporary issue',24:'Expired',25:'Sensor failed',26:'Session ended'};
 const KINDS = {0:'No CGM',6:'Dexcom G6',7:'Dexcom G7'};
-let cgmEdited = {}, cgmStatus = null, cgmFetched = 0;
+let cgmEdited = {}, cgmStatus = null, cgmFetched = 0, cgmFetchedAt = 0;
 ['cgmGlucoseIn','cgmTrendIn','cgmStateIn','g6Id','cgmSourceIn','cgmIsfIn','cgmIcrIn','cgmBasalIn']
   .forEach(id=>{ const e=$(id); if(e) e.oninput=()=>cgmEdited[id]=true; });
 
@@ -414,7 +414,7 @@ function showCgm(c){
   $('cgmSensorBox').hidden = !kind;
   $('cgmSourceCard').hidden = !kind;
   if(!kind){ cgmStatus = null; return; }
-  cgmStatus = c; cgmFetched = performance.now(); cgmCountdown();
+  cgmStatus = c; cgmFetched = performance.now(); cgmFetchedAt = Date.now()/1000; cgmCountdown();
   $('g6Box').hidden = kind!==6;
   $('g7Box').hidden = kind!==7;
   if(kind===6 && document.activeElement!==$('g6Id') && !$('g6Id').value) $('g6Id').value = c.id || '';
@@ -454,7 +454,9 @@ function showPerson(c){
 function cgmCountdown(){
   if(!cgmStatus || !cgmStatus.kind) return;
   const elapsed = (performance.now() - cgmFetched)/1000;
-  let s = Math.max(0, Math.round(cgmStatus.nextReading - (cgmStatus.now + elapsed)));
+  const at = cgmStatus.now || cgmFetchedAt; /* the board's clock; this browser's if it sent none */
+  let s = Math.max(0, Math.round(cgmStatus.nextReading - (at + elapsed)));
+  if(!isFinite(s)){ $('cgmNext').textContent = '—'; return; }
   $('cgmNext').textContent = Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
 }
 setInterval(cgmCountdown, 1000);
