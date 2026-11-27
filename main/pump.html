@@ -525,6 +525,18 @@ $('faultIn').value = 28;
 ['resIn','ageIn'].forEach(id=>$(id).oninput=()=>edited[id]=true);
 $('alertChecks').onchange = ()=>edited.alerts=true;
 
+/* Ask on the page itself, not with confirm(): the captive-portal sheet a phone
+ * opens on joining the board's Wi-Fi shows no pop-ups (iOS answers them Cancel),
+ * so a button behind one did nothing there. The first tap arms the button and
+ * says what it will do; a second tap within 5 s goes ahead. */
+function sure(q, tell){
+  const b = window.event && window.event.currentTarget;
+  if(!b || !b.tagName) return confirm(q);
+  if(b.dataset.armed){ clearTimeout(+b.dataset.armed); delete b.dataset.armed; b.textContent = b.dataset.label; return true; }
+  b.dataset.label = b.textContent; b.textContent = 'Tap again to confirm';
+  b.dataset.armed = setTimeout(()=>{ delete b.dataset.armed; b.textContent = b.dataset.label; }, 5000);
+  (tell || say)(q); return false;
+}
 function say(t){ $('msg').textContent=t; if(t) setTimeout(()=>{ if($('msg').textContent===t) $('msg').textContent=''; }, 4000); }
 
 async function send(body, done){
@@ -543,17 +555,17 @@ document.querySelectorAll('[data-hours]').forEach(b=>b.onclick=()=>{ edited.ageI
 $('alertsSet').onclick = ()=>{ let m=0; document.querySelectorAll('#palertChecks input').forEach(c=>{ if(c.checked) m|=1<<+c.dataset.slot; });
   edited.alerts=false; send({command:'setAlerts', value:m}, 'Alerts set'); };
 $('faultSet').onclick = ()=>{ const c=+$('faultIn').value;
-  if(confirm('Fault the pod with '+hex(c)+' — '+faultName(c)+'? A faulted pod stops delivery and must be replaced.'))
+  if(sure('Fault the pod with '+hex(c)+' — '+faultName(c)+'? A faulted pod stops delivery and must be replaced.'))
     send({command:'setFault', value:c}, 'Fault triggered'); };
 $('faultClear').onclick = ()=>send({command:'setFault', value:0}, 'Fault cleared');
 $('crashBefore').onclick = ()=>send({command:'crashNextCommand', beforeProcessing:true}, 'Armed');
 $('crashAfter').onclick = ()=>send({command:'crashNextCommand', beforeProcessing:false}, 'Armed');
 
 $('typeSet').onclick = ()=>{ const o5 = last.podType === 'Omnipod 5', name = o5 ? 'DASH' : 'Omnipod 5';
-  if(confirm((last.paired ? 'This '+last.podType+' pod is paired with a phone, and switching ends it. Discard it in the app first.\n\n' : '')
+  if(sure((last.paired ? 'This '+last.podType+' pod is paired with a phone, and switching ends it. Discard it in the app first.\n\n' : '')
       +'Forget this pod and become a new, unpaired '+name+' pod?'))
     send({command:'setPodType', value:o5 ? 0 : 1}, 'Now a new '+name+' pod'); };
-$('newPod').onclick = ()=>{ if(confirm('Forget this pod? The phone will need to pair a new one.')) send({command:'resetPod'}, 'New pod ready'); };
+$('newPod').onclick = ()=>{ if(sure('Forget this pod? The phone will need to pair a new one.')) send({command:'resetPod'}, 'New pod ready'); };
 
 function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
 
@@ -635,11 +647,11 @@ $('snSet').onclick = ()=>{ edited.snIn=false; send({command:'medtrumSetSerial', 
 $('resSet').onclick = ()=>{ edited.resIn=false; send({command:'medtrumSetReservoir', units:+$('resIn').value}, 'Reservoir set'); };
 $('stateSet').onclick = ()=>{ edited.stateIn=false; send({command:'medtrumSetState', state:+$('stateIn').value}, 'State set'); };
 $('faultSet').onclick = ()=>{ const c=+$('faultIn').value;
-  if(confirm('Fault the patch with '+hex(c)+' — '+faultName(c)+'? A faulted patch stops delivery and must be replaced.'))
+  if(sure('Fault the patch with '+hex(c)+' — '+faultName(c)+'? A faulted patch stops delivery and must be replaced.'))
     send({command:'medtrumSetFault', state:c}, 'Fault triggered'); };
 $('faultClear').onclick = ()=>send({command:'medtrumSetFault', state:32}, 'Fault cleared');
-$('crash').onclick = ()=>{ if(confirm('Reboot the base at the next command? The phone loses its in-flight command.')) send({command:'medtrumCrash'}, 'Armed'); };
-$('newPatch').onclick = ()=>{ if(confirm('Forget this patch? The phone will need to activate a new one.')) send({command:'medtrumReset'}, 'New patch ready'); };
+$('crash').onclick = ()=>{ if(sure('Reboot the base at the next command? The phone loses its in-flight command.')) send({command:'medtrumCrash'}, 'Armed'); };
+$('newPatch').onclick = ()=>{ if(sure('Forget this patch? The phone will need to activate a new one.')) send({command:'medtrumReset'}, 'New patch ready'); };
 
 function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
 
@@ -692,7 +704,7 @@ refresh(); setInterval(refresh, 1000);
     const j = await send({command:'ypsoSuspend', on:on}, on ? 'Suspended' : 'Resumed'); if(j) show(j);
   };
   $('ypReboot').onclick = async ()=>{
-    if(confirm('Restart the pump? Its reboot counter goes up, and the phone must authorise again.')){
+    if(sure('Restart the pump? Its reboot counter goes up, and the phone must authorise again.', say)){
       const j = await send({command:'ypsoReboot'}, 'Pump restarted'); if(j) show(j);
     }
   };
@@ -701,7 +713,7 @@ refresh(); setInterval(refresh, 1000);
     const j = await send({command:'ypsoOpen', on:on}, on ? 'Any phone gets in' : 'Only the pump password gets in'); if(j) show(j);
   };
   $('ypBonds').onclick = ()=>{
-    if(confirm('Forget every Bluetooth bond? The phone must pair again (and may need to forget the pump too).')) send({command:'ypsoForgetBonds'}, 'Bonds forgotten');
+    if(sure('Forget every Bluetooth bond? The phone must pair again (and may need to forget the pump too).', say)) send({command:'ypsoForgetBonds'}, 'Bonds forgotten');
   };
   function chip(el, text, cls){ el.textContent=text; el.className='chip '+(cls||''); }
   function show(y){

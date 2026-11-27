@@ -227,6 +227,18 @@ const cgmPage = location.pathname === '/cgm' || location.pathname === '/g7';
 if(cgmPage){ document.body.classList.add('cgm-page'); document.title = 'CGM | ESP-Sim'; $('navCgm').classList.add('active'); }
 else { $('navHome').classList.add('active'); }
 
+/* Ask on the page itself, not with confirm(): the captive-portal sheet a phone
+ * opens on joining the board's Wi-Fi shows no pop-ups (iOS answers them Cancel),
+ * so a button behind one did nothing there. The first tap arms the button and
+ * says what it will do; a second tap within 5 s goes ahead. */
+function sure(q, tell){
+  const b = window.event && window.event.currentTarget;
+  if(!b || !b.tagName) return confirm(q);
+  if(b.dataset.armed){ clearTimeout(+b.dataset.armed); delete b.dataset.armed; b.textContent = b.dataset.label; return true; }
+  b.dataset.label = b.textContent; b.textContent = 'Tap again to confirm';
+  b.dataset.armed = setTimeout(()=>{ delete b.dataset.armed; b.textContent = b.dataset.label; }, 5000);
+  (tell || say)(q); return false;
+}
 function say(t){ const el = cgmPage ? $('cmsg') : $('msg'); if(!el) return; el.textContent=t;
   if(t) setTimeout(()=>{ if(el.textContent===t) el.textContent=''; }, 4000); }
 
@@ -293,7 +305,7 @@ async function refreshBoard(){
 }
 
 async function reboot(){ try { const r = await fetch('/settings/reboot',{method:'POST'}); if(!r.ok) throw new Error((await r.text()).trim()); say('Rebooting…'); } catch(e){ say('Failed — '+e.message); } }
-$('reboot').onclick = ()=>{ if(confirm('Reboot the board? It comes back with the same state.')) reboot(); };
+$('reboot').onclick = ()=>{ if(sure('Reboot the board? It comes back with the same state.')) reboot(); };
 
 /* The board keeps the local time of wherever its panel is opened: the browser's
  * zone, as a POSIX TZ (offsets, and the DST rule found from this year's changes). */
@@ -344,13 +356,13 @@ document.querySelectorAll('#cgmSel button').forEach(b=>b.onclick=()=>{
   const k = +b.dataset.kind;
   const id = k===6 ? $('g6Id').value.trim().toUpperCase() : '';
   const what = k===6 ? (id ? 'a G6 transmitter '+id : 'a new G6 transmitter') : k===7 ? 'a new G7 sensor' : 'no CGM';
-  if(k && !confirm('Start '+what+'? Use it only with a test phone that controls no real pump or pod.')) return;
+  if(k && !sure('Start '+what+'? Use it only with a test phone that controls no real pump or pod.')) return;
   cgmSend({command:'cgmNew', kind:k, id:id}, k ? 'Started '+what : 'CGM off');
 });
 $('g6New').onclick = ()=>{ const id=$('g6Id').value.trim().toUpperCase();
-  if(!confirm('Start '+(id?'G6 transmitter '+id:'a new G6 transmitter')+'?')) return;
+  if(!sure('Start '+(id?'G6 transmitter '+id:'a new G6 transmitter')+'?')) return;
   cgmSend({command:'cgmNew', kind:6, id:id}, 'Started a G6'); };
-$('g7New').onclick = ()=>{ if(!confirm('Start a new G7 sensor? It makes a new pairing code.')) return;
+$('g7New').onclick = ()=>{ if(!sure('Start a new G7 sensor? It makes a new pairing code.')) return;
   cgmSend({command:'cgmNew', kind:7, id:''}, 'Started a G7'); };
 $('cgmStateSet').onclick = ()=>{ cgmEdited.cgmStateIn=false; cgmSend({command:'cgmState', state:+$('cgmStateIn').value}, 'State set'); };
 $('cgmSkip').onclick = ()=>cgmSend({command:'cgmSkipWarmup'}, 'Warm-up skipped');
