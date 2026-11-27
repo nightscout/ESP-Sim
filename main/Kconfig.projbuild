@@ -12,8 +12,16 @@ config ESPSIM_AP_SSID_PREFIX
     default "ESP-Sim-Pod"
     help
         With no Wi-Fi network saved, the board runs an access point named
-        this plus the end of its MAC address. Its password is printed on the
-        serial console at boot.
+        this plus the end of its MAC address. Its password is
+        ESPSIM_AP_PASSWORD.
+
+config ESPSIM_AP_PASSWORD
+    string "Access point password"
+    default "esp-sim-pod"
+    help
+        The password of the board's own access point: 8 to 16 characters
+        (WPA2). The same on every board built with it, and in the README:
+        it keeps strangers from joining by accident, it is not a secret.
 
 choice ESPSIM_MEDTRUM_MODEL
     prompt "Default Medtrum model"

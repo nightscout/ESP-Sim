@@ -58,7 +58,9 @@ void panel_ap_credentials(char ssid[33], char pass[17])
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(ssid, 33, "%s-%02X%02X", CONFIG_ESPSIM_AP_SSID_PREFIX, mac[4], mac[5]);
-    snprintf(pass, 17, "pod-%02x%02x%02x%02x", mac[2] ^ 0x5a, mac[3] ^ 0xa5, mac[4] ^ 0x3c, mac[5] ^ 0xc3);
+    _Static_assert(sizeof CONFIG_ESPSIM_AP_PASSWORD >= 9 && sizeof CONFIG_ESPSIM_AP_PASSWORD <= 17,
+                   "ESPSIM_AP_PASSWORD is 8 to 16 characters (WPA2)");
+    snprintf(pass, 17, "%s", CONFIG_ESPSIM_AP_PASSWORD);
 }
 
 static void start_ap(void)

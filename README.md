@@ -82,8 +82,11 @@ Pair it from the app as a new Omnipod DASH pod.
 **Control panel.** The serial console prints where it is:
 
 - With no Wi-Fi network saved, the board runs its own access point,
-  `ESP-Sim-Pod-XXXX`. Its password, derived from the chip's MAC, is printed
-  at boot. Join it and open http://192.168.4.1/.
+  `ESP-Sim-Pod-XXXX` (the end of the board's MAC address). Its password is
+  `esp-sim-pod` on every board (`ESPSIM_AP_PASSWORD` in `idf.py menuconfig`,
+  8 to 16 characters); it is printed at boot too. Join it and open
+  http://192.168.4.1/. Boards built before this used a password made from
+  their MAC address, which their boot log shows.
 - In the panel's Wi-Fi card, save your network: the board restarts, joins it,
   takes the time from NTP and prints its address.
 
