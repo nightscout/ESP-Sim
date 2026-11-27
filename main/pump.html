@@ -382,6 +382,8 @@
     /* Which pump the board is. Asked until it answers: a page opened while the
      * board restarts (after new firmware, say) otherwise showed no pump at all,
      * as if none were chosen. */
+    let fwPicked = false;
+    $('fwIn').onchange = () => { fwPicked = true; };
     async function select(){
       let s; try { s = await (await fetch('/settings/status')).json(); }
       catch(e){ setTimeout(select, 2000); return; }
@@ -396,6 +398,12 @@
       }
       document.querySelectorAll('#pumpSel button').forEach(b => b.classList.toggle('active', b.dataset.pump === p));
       $('fwBox').hidden = p !== 'ypso';
+      /* The firmware the YpsoPump runs now, so that choosing YpsoPump again
+       * keeps it: the list started on V05, and re-choosing switched a V65
+       * pump (rockit's) to encrypted V05 without a word. */
+      if (p === 'ypso' && !fwPicked) {
+        try { const y = await (await fetch('/ypso')).json(); if (y.fw != null) $('fwIn').value = String(y.fw); } catch (e) {}
+      }
       $('podPanel').hidden = !(p === 'pod-dash' || p === 'pod-o5');
       $('ypsoPanel').hidden = p !== 'ypso';
       $('medtrumPanel').hidden = p !== 'medtrum';
